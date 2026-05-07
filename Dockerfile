@@ -14,9 +14,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy app files
 COPY . .
 
-# Build knowledge base
-RUN python ingest.py
-
 EXPOSE 8000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD python ingest.py && uvicorn main:app --host 0.0.0.0 --port 8000
