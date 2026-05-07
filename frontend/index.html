@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#052e16">
+  <title>Environ Property Services — Assistant</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="header">
+    <div class="header-brand">
+      <div class="header-logo">
+        <span class="logo-emoji">🏠</span>
+      </div>
+      <div class="header-text">
+        <h1>Environ Property Services</h1>
+        <p><span class="status-dot"></span>Property Care Specialist · Online</p>
+      </div>
+    </div>
+    <div class="header-actions">
+      <button class="hdr-book-btn" onclick="sendChip(this)" data-msg="I'd like to book a free property inspection">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+        <span>Book Inspection</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Chat messages -->
+  <main class="chat-area" id="chatArea">
+
+    <!-- Welcome message -->
+    <div class="message-row" style="animation-delay:0.05s">
+      <div class="bot-avatar"><span>EP</span></div>
+      <div class="message-bubble bot-bubble">
+        <p>Hi there! I'm <strong>Alex</strong>, your property specialist from <strong>Environ Property Services</strong> — London's trusted damp, mould &amp; property preservation experts.</p>
+        <p>Whether it's damp, mould, timber rot, or a period property, I'm here to help. What can I assist you with today?</p>
+      </div>
+    </div>
+
+    <!-- Quick chips -->
+    <div class="quick-chips" id="quickChips">
+      <button class="chip" onclick="sendChip(this)">🦠 Black mould problem</button>
+      <button class="chip" onclick="sendChip(this)">💧 Damp walls or floors</button>
+      <button class="chip" onclick="sendChip(this)">🏡 Buying a property</button>
+      <button class="chip" onclick="sendChip(this)">🏛️ Victorian or heritage home</button>
+      <button class="chip" onclick="sendChip(this)">🪵 Dry or wet rot</button>
+      <button class="chip chip-book" onclick="sendChip(this)">📅 Book a free inspection</button>
+    </div>
+
+  </main>
+
+  <!-- Image preview bar -->
+  <div class="image-preview" id="imagePreview">
+    <div class="preview-inner">
+      <img id="previewImg" src="" alt="Image preview">
+      <div class="preview-info">
+        <span class="preview-title">Photo attached</span>
+        <span class="preview-sub">Ready to send with your message</span>
+      </div>
+      <button class="remove-img-btn" onclick="removeImage()">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- Input area -->
+  <div class="input-area">
+    <div class="input-card">
+      <label class="attach-label" for="imageInput" title="Attach a photo of your property issue">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
+          <line x1="9" y1="10" x2="15" y2="10"/><line x1="12" y1="7" x2="12" y2="13"/>
+        </svg>
+      </label>
+      <input type="file" id="imageInput" accept="image/*" onchange="handleImageSelect(event)">
+      <textarea
+        id="messageInput"
+        placeholder="Describe your property issue or ask a question…"
+        rows="1"
+        onkeydown="handleKeyDown(event)"
+        oninput="autoResize(this)"
+      ></textarea>
+      <button class="send-btn" id="sendBtn" onclick="sendMessage()" title="Send">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="white">
+          <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
