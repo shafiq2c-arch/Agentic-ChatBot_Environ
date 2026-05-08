@@ -443,8 +443,11 @@ async function sendMessage() {
       bookingDone = true;
     }
 
-    // Update history
-    conversationHistory.push({ role: 'user', content: effectiveMessage });
+    // Update history — tag image messages so context is preserved in follow-up turns
+    const historyContent = imgPayload.image_base64
+      ? `[Photo attached] ${effectiveMessage}`
+      : effectiveMessage;
+    conversationHistory.push({ role: 'user', content: historyContent });
     conversationHistory.push({ role: 'assistant', content: fullText });
     if (conversationHistory.length > 20) conversationHistory = conversationHistory.slice(-20);
     _persist();

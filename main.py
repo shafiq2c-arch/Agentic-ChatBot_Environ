@@ -372,8 +372,9 @@ def _send_email_notification(name: str, phone: str, email: str, dt: datetime.dat
 def find_customer_booking(email: str) -> dict:
     try:
         service  = get_calendar_service()
-        now      = datetime.datetime.utcnow().isoformat() + "Z"
-        future   = (datetime.datetime.utcnow() + datetime.timedelta(days=90)).isoformat() + "Z"
+        _now    = datetime.datetime.now(datetime.timezone.utc)
+        now     = _now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        future  = (_now + datetime.timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
         result   = service.events().list(
             calendarId=CALENDAR_ID, timeMin=now, timeMax=future,
             q=email, singleEvents=True, orderBy="startTime"
@@ -739,7 +740,7 @@ def extract_booking_state(history: list) -> str:
             if role != "assistant":
                 continue
             lc2 = content.lower()
-            if "pick a time" in lc2 or "please pick" in lc2 or "availability" in lc2:
+            if "pick a time" in lc2 or "please pick" in lc2 or "we have availability on" in lc2:
                 next_role2, next_val2 = msgs[i + 1]
                 if next_role2 == "user":
                     parsed = parse_time_to_hhmm(next_val2)
@@ -765,7 +766,7 @@ def extract_booking_state(history: list) -> str:
     if "name" not in collected:
         NAME_PATTERNS = [
             re.compile(r"\bmy name(?:\s+is)?\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,3})\b", re.IGNORECASE),
-            re.compile(r"\bi(?:'m|\s+am)\s+([A-Za-z]+(?:\s+[A-Za-z]+){1,3})\b", re.IGNORECASE),
+            re.compile(r"\bcall me\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,2})\b", re.IGNORECASE),
             re.compile(r"\bname[:\s]+([A-Za-z]+(?:\s+[A-Za-z]+){0,3})\b", re.IGNORECASE),
         ]
         for msg_role, msg_content in msgs:
@@ -813,6 +814,19 @@ def extract_booking_state(history: list) -> str:
     if not collected:
         return ""
 
+    # ── Only push booking NEXT STEP when genuinely in booking mode ──
+    # Suppress NEXT STEP if only a service keyword was passively detected
+    # from an info question (e.g. "what causes rising damp?").
+    BOOKING_INTENT_KEYWORDS = [
+        "book", "appointment", "schedule", "inspection", "come out",
+        "send someone", "arrange", "fix a time", "set up", "available",
+        "free inspection", "free survey", "make a booking", "want to book",
+        "like to book", "need to book", "can you come", "when can you",
+    ]
+    _all_user_text = " ".join(c.lower() for r, c in msgs if r == "user")
+    _booking_intent = any(kw in _all_user_text for kw in BOOKING_INTENT_KEYWORDS)
+    _mid_flow = len(collected) >= 2   # 2+ fields means we're actively booking
+
     # ── Build structured state block ──────────────────
     label_map = {
         "service":      "🔧 Service",
@@ -830,27 +844,31 @@ def extract_booking_state(history: list) -> str:
         if key in collected:
             lines.append(f"  ✅ {label_map[key]}: {collected[key]}")
 
-    # Determine exactly what to do next
-    if "service" not in collected:
-        next_step = 'Ask: "What service do you need?"'
-    elif "issue" not in collected:
-        next_step = ('Ask: "Could you briefly describe the issue?" — '
-                     'then accept the VERY NEXT reply as-is, even one word. Move on immediately.')
-    elif "date_chosen" not in collected and "time_slot" not in collected:
-        next_step = 'Ask which day works and call check_availability. Do NOT ask for issue again.'
-    elif "time_slot" not in collected:
-        next_step = 'Wait for user to pick a time slot from the buttons.'
-    elif "name" not in collected:
-        next_step = 'Ask: "Could you provide your full name?"'
-    elif "phone" not in collected:
-        next_step = 'Ask: "Could you provide your phone number?"'
-    elif "email" not in collected:
-        next_step = 'Ask: "Could you provide your email address?"'
+    # Determine exactly what to do next — only push booking steps when in booking mode
+    if _booking_intent or _mid_flow:
+        if "service" not in collected:
+            next_step = 'Ask: "What service do you need?"'
+        elif "issue" not in collected:
+            next_step = ('Ask: "Could you briefly describe the issue?" — '
+                         'then accept the VERY NEXT reply as-is, even one word. Move on immediately.')
+        elif "date_chosen" not in collected and "time_slot" not in collected:
+            next_step = 'Ask which day works and call check_availability. Do NOT ask for issue again.'
+        elif "time_slot" not in collected:
+            next_step = 'Wait for user to pick a time slot from the buttons.'
+        elif "name" not in collected:
+            next_step = 'Ask: "Could you provide your full name?"'
+        elif "phone" not in collected:
+            next_step = 'Ask: "Could you provide your phone number?"'
+        elif "email" not in collected:
+            next_step = 'Ask: "Could you provide your email address?"'
+        else:
+            next_step = 'Show full confirmation summary and ask "Shall I confirm this booking?"'
+        lines.append(f"\n  ⏭  NEXT STEP: {next_step}")
+        lines.append("  🚫 DO NOT re-ask for any ✅ field above — they are final.")
     else:
-        next_step = 'Show full confirmation summary and ask "Shall I confirm this booking?"'
+        lines.append("\n  ℹ️  User is in support/info mode — answer their question freely.")
+        lines.append("  🚫 DO NOT re-ask for any ✅ field above — they are final.")
 
-    lines.append(f"\n  ⏭  NEXT STEP: {next_step}")
-    lines.append("  🚫 DO NOT re-ask for any ✅ field above — they are final.")
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     return "\n".join(lines)
 
@@ -905,7 +923,7 @@ async def chat(req: ChatRequest):
             messages=messages,
             tools=TOOLS,
             tool_choice="auto",
-            max_tokens=350,
+            max_tokens=500,
             temperature=0.4,
         )
         choice = response.choices[0]
@@ -993,7 +1011,7 @@ async def chat(req: ChatRequest):
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"}
     )
 
 
