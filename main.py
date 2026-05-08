@@ -635,9 +635,13 @@ def extract_booking_state(history: list) -> str:
 
         lc = content.lower()
 
-        # Name (first)
+        # Name (first) — accept 1-4 words, no @, no digits, not a description
         if ("your name" in lc or "full name" in lc) and "last name" not in lc:
-            if "@" not in next_val and len(next_val.split()) <= 4 and any(c.isalpha() for c in next_val):
+            words = next_val.split()
+            if ("@" not in next_val
+                    and 1 <= len(words) <= 4
+                    and not any(c.isdigit() for c in next_val)
+                    and all(len(w) >= 2 for w in words)):   # each word at least 2 chars
                 collected["name"] = next_val
 
         # Last name — append to first name
@@ -649,9 +653,12 @@ def extract_booking_state(history: list) -> str:
                 elif not first:
                     collected["name"] = next_val
 
-        # Phone
+        # Phone — require ≥7 digits AND digits make up ≥50% of the string
         if ("phone" in lc or "mobile" in lc or "contact number" in lc) and "email" not in lc:
-            if any(c.isdigit() for c in next_val) and len(next_val) <= 20:
+            digits_in_val = re.sub(r"\D", "", next_val)
+            if (len(digits_in_val) >= 7
+                    and len(digits_in_val) / max(len(next_val), 1) >= 0.5
+                    and len(next_val) <= 20):
                 collected["phone"] = next_val
 
         # Email
@@ -662,9 +669,12 @@ def extract_booking_state(history: list) -> str:
         if ("which service" in lc or "what service" in lc) and len(next_val.split()) <= 8:
             collected["service"] = next_val
 
-        # Issue / description
-        if ("describe the issue" in lc or "what issue" in lc or "briefly describe" in lc) and len(next_val.split()) >= 2:
-            collected["issue"] = next_val
+        # Issue / description — at least 3 words and not a confirmation word
+        CONFIRM_WORDS = {"yes","sure","ok","yeah","correct","go ahead","confirm","confirmed",
+                         "please","do it","book it","yep","yup","done","okay"}
+        if ("describe the issue" in lc or "what issue" in lc or "briefly describe" in lc):
+            if len(next_val.split()) >= 3 and next_val.lower().strip() not in CONFIRM_WORDS:
+                collected["issue"] = next_val
 
         # Date chosen
         if ("which day" in lc or "what day" in lc or "what date" in lc) and len(next_val) <= 40:
