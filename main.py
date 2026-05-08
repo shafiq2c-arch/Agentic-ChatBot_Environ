@@ -4,8 +4,12 @@ Booking-focused with Google Calendar + Twilio WhatsApp
 """
 import os
 import json
+import re
 import datetime
 import pytz
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -34,6 +38,7 @@ WORK_END_H         = 18  # 6 PM
 SLOT_DURATION_H    = 1
 
 GOOGLE_CREDS_FILE  = "google_credentials.json"
+NOTIFY_EMAIL       = "aiagentsautomation87@gmail.com"
 
 # ── System prompt ──────────────────────────────────
 SYSTEM_PROMPT_TEMPLATE = """You are Alex, a friendly property specialist for Environ Property Services, London.
@@ -208,8 +213,6 @@ def check_calendar_availability(date_str: str) -> dict:
 
 
 def create_calendar_booking(args: dict) -> dict:
-    import re
-
     # ── Email validation ──────────────────────────────
     email = args.get("email", "").strip()
     if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]{2,}$", email):
@@ -273,20 +276,29 @@ def create_calendar_booking(args: dict) -> dict:
             }
         ).execute()
 
-        # WhatsApp is best-effort — never block the booking if it fails
-        wa_note = ""
+        # Notifications are best-effort — never block the booking if they fail
+        notes = []
+        svc   = args.get("service", "Property Inspection")
+        issue = args.get("issue", "N/A")
+
         try:
-            _send_whatsapp(args["name"], args["phone"], args["email"], start, args.get("service", "Property Inspection"), args.get("issue", "N/A"))
+            _send_whatsapp(args["name"], args["phone"], args["email"], start, svc, issue)
         except Exception as wa_err:
             print(f"[WHATSAPP ERROR] {wa_err}", flush=True)
-            wa_note = f" (WhatsApp notification failed: {wa_err})"
+            notes.append(f"WhatsApp failed: {wa_err}")
+
+        try:
+            _send_email_notification(args["name"], args["phone"], args["email"], start, svc, issue)
+        except Exception as em_err:
+            print(f"[EMAIL ERROR] {em_err}", flush=True)
+            notes.append(f"Email failed: {em_err}")
 
         return {
             "success": True,
             "formatted_date": start.strftime("%A, %d %B %Y"),
             "formatted_time": start.strftime("%I:%M %p"),
             "name": args["name"],
-            "note": wa_note.strip()
+            "note": "; ".join(notes)
         }
     except Exception as e:
         print(f"[BOOKING ERROR] {e}", flush=True)
@@ -313,6 +325,48 @@ def _send_whatsapp(name: str, phone: str, email: str, dt: datetime.datetime, ser
         to=f"whatsapp:{NOTIFY_WA_NUMBER}",
         body=body
     )
+
+
+def _send_email_notification(name: str, phone: str, email: str, dt: datetime.datetime,
+                              service: str = "Property Inspection", issue: str = "N/A"):
+    gmail_user     = os.getenv("GMAIL_SENDER")       # your gmail address used to send
+    gmail_password = os.getenv("GMAIL_APP_PASSWORD")  # 16-char app password (not your login password)
+    if not gmail_user or not gmail_password:
+        raise ValueError("GMAIL_SENDER or GMAIL_APP_PASSWORD not set in environment")
+
+    subject = f"📅 New Booking – {name} | {dt.strftime('%d %b %Y %I:%M %p')}"
+
+    html = f"""
+    <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;border:1px solid #e0e0e0;border-radius:8px;overflow:hidden;">
+      <div style="background:#1a6b3c;padding:20px 24px;">
+        <h2 style="color:#fff;margin:0">🏠 New Booking – Environ Property Services</h2>
+      </div>
+      <div style="padding:24px;background:#f9f9f9;">
+        <table style="width:100%;border-collapse:collapse;">
+          <tr><td style="padding:8px 0;color:#555;width:120px;">👤 Name</td><td style="padding:8px 0;font-weight:bold;">{name}</td></tr>
+          <tr><td style="padding:8px 0;color:#555;">📱 Phone</td><td style="padding:8px 0;">{phone}</td></tr>
+          <tr><td style="padding:8px 0;color:#555;">📧 Email</td><td style="padding:8px 0;">{email}</td></tr>
+          <tr><td style="padding:8px 0;color:#555;">🔧 Service</td><td style="padding:8px 0;">{service}</td></tr>
+          <tr><td style="padding:8px 0;color:#555;">⚠️ Issue</td><td style="padding:8px 0;">{issue}</td></tr>
+          <tr><td style="padding:8px 0;color:#555;">📅 Date</td><td style="padding:8px 0;font-weight:bold;">{dt.strftime('%A, %d %B %Y')}</td></tr>
+          <tr><td style="padding:8px 0;color:#555;">⏰ Time</td><td style="padding:8px 0;font-weight:bold;">{dt.strftime('%I:%M %p')}</td></tr>
+        </table>
+      </div>
+      <div style="padding:12px 24px;background:#e8f5ee;font-size:13px;color:#555;">
+        Booked via the Environ website chatbot.
+      </div>
+    </div>
+    """
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"]    = gmail_user
+    msg["To"]      = NOTIFY_EMAIL
+    msg.attach(MIMEText(html, "html"))
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        server.login(gmail_user, gmail_password)
+        server.sendmail(gmail_user, NOTIFY_EMAIL, msg.as_string())
 
 
 def execute_tool(name: str, args: dict) -> dict:
