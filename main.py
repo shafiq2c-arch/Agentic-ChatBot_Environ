@@ -75,6 +75,8 @@ IMPORTANT RULES:
 - If book_appointment returns success=false with an error about email or phone: ask ONLY for the corrected field, then IMMEDIATELY call book_appointment again with ALL previously collected values (date, time, name, phone, email, service, issue) — do NOT ask for any other fields again
 - If user gives only ONE word as their name, IMMEDIATELY ask "And your last name?" — do NOT move to phone until you have at least two words
 - Confirmation words — treat ALL of these as "yes, proceed": "yes", "sure", "ok", "yeah", "correct", "go ahead", "confirm", "confirmed", "please", "do it", "book it", "yep", "yup"
+- If book_appointment fails because slot was just taken: call check_availability for the same date, show new slots as buttons. Once user picks new slot, call book_appointment immediately with the SAME name/phone/email/service/issue — DO NOT ask for any of them again
+- If user says "done", "already did", "already provided", "already gave" — they gave the info earlier. Find it in the ALREADY PROVIDED section and use it silently without asking again
 - Include the service in the calendar booking summary field
 
 DATE RULES:
@@ -272,18 +274,17 @@ def check_calendar_availability(date_str: str) -> dict:
 
 
 def create_calendar_booking(args: dict) -> dict:
-    # ── Email validation ──────────────────────────────
+    # ── Basic sanity checks only ──────────────────────
     email = args.get("email", "").strip()
-    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]{2,}$", email):
+    if "@" not in email or "." not in email.split("@")[-1]:
         return {"success": False, "error": "invalid_email",
-                "message": "That doesn't look like a valid email. Please ask the customer for a valid email (e.g. name@gmail.com)."}
+                "message": "The email address must contain @ and a domain (e.g. name@gmail.com)."}
 
-    # ── Phone validation: basic pattern only ─────────
     phone = args.get("phone", "").strip()
     digits_only = re.sub(r"\D", "", phone)
-    if len(digits_only) < 6 or len(digits_only) > 15:
+    if len(digits_only) < 6:
         return {"success": False, "error": "invalid_phone",
-                "message": "Please provide a valid phone number (6–15 digits)."}
+                "message": "Please provide a valid phone number."}
 
     try:
         dt    = datetime.datetime.strptime(f"{args['date']} {args['time']}", "%Y-%m-%d %H:%M")
@@ -618,9 +619,84 @@ class ChatRequest(BaseModel):
     history: list[HistoryMessage] = []
 
 
+def extract_booking_state(history: list) -> str:
+    """Scan conversation history and extract already-collected booking fields."""
+    collected = {}
+    msgs = [(m.role, m.content.strip()) for m in history]
+
+    for i in range(len(msgs) - 1):
+        role, content = msgs[i]
+        if role != "assistant":
+            continue
+        next_role, next_val = msgs[i + 1]
+        if next_role != "user" or not next_val or len(next_val) > 200:
+            continue
+
+        lc = content.lower()
+
+        # Name (first)
+        if ("your name" in lc or "full name" in lc) and "last name" not in lc:
+            if "@" not in next_val and len(next_val.split()) <= 4 and any(c.isalpha() for c in next_val):
+                collected["name"] = next_val
+
+        # Last name — append to first name
+        if "last name" in lc:
+            if "@" not in next_val and not any(c.isdigit() for c in next_val) and len(next_val.split()) <= 2:
+                first = collected.get("name", "")
+                if first and next_val.lower() not in first.lower():
+                    collected["name"] = f"{first} {next_val}"
+                elif not first:
+                    collected["name"] = next_val
+
+        # Phone
+        if ("phone" in lc or "mobile" in lc or "contact number" in lc) and "email" not in lc:
+            if any(c.isdigit() for c in next_val) and len(next_val) <= 20:
+                collected["phone"] = next_val
+
+        # Email
+        if "email" in lc and "@" in next_val:
+            collected["email"] = next_val
+
+        # Service
+        if ("which service" in lc or "what service" in lc) and len(next_val.split()) <= 8:
+            collected["service"] = next_val
+
+        # Issue / description
+        if ("describe the issue" in lc or "what issue" in lc or "briefly describe" in lc) and len(next_val.split()) >= 2:
+            collected["issue"] = next_val
+
+        # Date chosen
+        if ("which day" in lc or "what day" in lc or "what date" in lc) and len(next_val) <= 40:
+            collected["date_chosen"] = next_val
+
+        # Time slot clicked
+        if re.match(r"^\d{1,2}:\d{2}$", next_val):
+            collected["time_slot"] = next_val
+
+    if not collected:
+        return ""
+
+    lines = ["ALREADY PROVIDED IN THIS CONVERSATION — USE THESE, DO NOT ASK AGAIN:"]
+    label_map = {
+        "name": "👤 Name", "phone": "📱 Phone", "email": "📧 Email",
+        "service": "🔧 Service", "issue": "⚠️ Issue",
+        "date_chosen": "📅 Date", "time_slot": "⏰ Time slot"
+    }
+    for key, val in collected.items():
+        lines.append(f"  {label_map.get(key, key)}: {val}")
+
+    return "\n".join(lines)
+
+
 def build_messages(req: ChatRequest) -> tuple[list, str]:
     today   = datetime.date.today().strftime("%A, %d %B %Y")
     system  = SYSTEM_PROMPT_TEMPLATE.format(today=today)
+
+    # Inject already-collected booking fields so AI never re-asks them
+    session_state = extract_booking_state(req.history)
+    if session_state:
+        system = system + "\n\n" + session_state
+
     context = retrieve_context(req.message)
 
     messages = [{"role": "system", "content": system}]
@@ -640,13 +716,11 @@ def build_messages(req: ChatRequest) -> tuple[list, str]:
                 "detail": "high"
             }}
         ]
-        model = "gpt-4o"          # vision needed
     else:
         user_content = user_text
-        model = "gpt-4o-mini"     # 10× cheaper for text
 
     messages.append({"role": "user", "content": user_content})
-    return messages, model
+    return messages, "gpt-4o"   # gpt-4o for all — much better context tracking
 
 
 # ── Chat endpoint ──────────────────────────────────
