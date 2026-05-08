@@ -747,6 +747,56 @@ def extract_booking_state(history: list) -> str:
                 collected["date_chosen"] = msg_content.strip()
                 break
 
+    # ── FALLBACK: extract name from any user message ──
+    # Handles "my name is David Clarke", "I'm David Clarke", name given upfront
+    if "name" not in collected:
+        NAME_PATTERNS = [
+            re.compile(r"\bmy name(?:\s+is)?\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,3})\b", re.IGNORECASE),
+            re.compile(r"\bi(?:'m|\s+am)\s+([A-Za-z]+(?:\s+[A-Za-z]+){1,3})\b", re.IGNORECASE),
+            re.compile(r"\bname[:\s]+([A-Za-z]+(?:\s+[A-Za-z]+){0,3})\b", re.IGNORECASE),
+        ]
+        for msg_role, msg_content in msgs:
+            if msg_role != "user":
+                continue
+            for pat in NAME_PATTERNS:
+                nm = pat.search(msg_content)
+                if nm:
+                    candidate = nm.group(1).strip()
+                    words = candidate.split()
+                    if (2 <= len(words) <= 4 and "@" not in candidate
+                            and not any(c.isdigit() for c in candidate)):
+                        collected["name"] = candidate
+                        break
+            if "name" in collected:
+                break
+
+    # ── FALLBACK: extract phone from any user message ──
+    # Handles "phone 07712345678", "call me on 07712 345 678", etc.
+    if "phone" not in collected:
+        PHONE_PATTERN = re.compile(r"\b((?:\+44\s*|0)[\d\s\-]{9,14})\b")
+        for msg_role, msg_content in msgs:
+            if msg_role != "user":
+                continue
+            pm = PHONE_PATTERN.search(msg_content)
+            if pm:
+                phone_raw = pm.group(1)
+                digits_only = re.sub(r"\D", "", phone_raw)
+                if len(digits_only) >= 7:
+                    collected["phone"] = phone_raw.strip()
+                    break
+
+    # ── FALLBACK: extract email from any user message ──
+    # Handles "email david.clarke@hotmail.com", address given upfront
+    if "email" not in collected:
+        EMAIL_PATTERN = re.compile(r"\b[\w.+\-]+@[\w.\-]+\.[a-z]{2,}\b", re.IGNORECASE)
+        for msg_role, msg_content in msgs:
+            if msg_role != "user":
+                continue
+            em = EMAIL_PATTERN.search(msg_content)
+            if em:
+                collected["email"] = em.group(0)
+                break
+
     if not collected:
         return ""
 
