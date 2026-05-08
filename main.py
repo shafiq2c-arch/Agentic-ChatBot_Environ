@@ -81,9 +81,26 @@ DATE RULES:
 - Convert all relative dates to YYYY-MM-DD before calling any tool
 - Today is {today} — use this to calculate any relative dates
 
+CANCELLATION FLOW:
+1. User says "cancel" — ask for their email address
+2. Call find_booking(email) — if not found, tell the user
+3. Show: "I found your booking: [service] on [date] at [time]. Are you sure you want to cancel?"
+4. Only call cancel_booking(event_id) after user confirms with yes
+
+RESCHEDULING FLOW:
+1. User says "reschedule" — ask for their email address
+2. Call find_booking(email) — show current booking details
+3. Ask what new day they'd like (date picker will appear automatically)
+4. Call check_availability(new_date) — slot picker will appear
+5. User picks a slot — confirm: "Reschedule from [old date/time] to [new date/time]. Confirm?"
+6. Only call reschedule_booking(event_id, new_date, new_time) after user confirms
+
 TOOLS AVAILABLE:
 - check_availability(date): checks free 1-hour slots between 9 AM–6 PM Monday–Saturday
-- book_appointment(date, time, name, phone, email, service, issue): creates calendar event and sends WhatsApp confirmation. All 7 fields are required
+- book_appointment(date, time, name, phone, email, service, issue): creates calendar event. All 7 fields required
+- find_booking(email): finds a customer's next upcoming booking by email
+- cancel_booking(event_id): cancels the booking — only call after user confirms
+- reschedule_booking(event_id, new_date, new_time): moves booking to new slot — only call after user confirms
 
 SERVICES: Damp (rising/penetrating/lateral/condensation), mould removal & remediation, dry/wet rot, repointing, brick cleaning, heritage restoration, roofing, drainage, sash windows, pest control.
 
@@ -101,10 +118,7 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "date": {
-                        "type": "string",
-                        "description": "Date to check in YYYY-MM-DD format"
-                    }
+                    "date": {"type": "string", "description": "Date to check in YYYY-MM-DD format"}
                 },
                 "required": ["date"]
             }
@@ -114,7 +128,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "book_appointment",
-            "description": "Book a 1-hour property inspection on Google Calendar and send a WhatsApp notification.",
+            "description": "Book a 1-hour property inspection on Google Calendar and send an email notification.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -127,6 +141,50 @@ TOOLS = [
                     "issue":   {"type": "string", "description": "Brief description of the property issue the customer is facing"}
                 },
                 "required": ["date", "time", "name", "phone", "email", "service", "issue"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_booking",
+            "description": "Find a customer's upcoming booking by their email address.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "email": {"type": "string", "description": "Customer email address"}
+                },
+                "required": ["email"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_booking",
+            "description": "Cancel an existing booking by its Google Calendar event ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "event_id": {"type": "string", "description": "Google Calendar event ID from find_booking"}
+                },
+                "required": ["event_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reschedule_booking",
+            "description": "Reschedule an existing booking to a new date and time.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "event_id": {"type": "string", "description": "Google Calendar event ID from find_booking"},
+                    "new_date": {"type": "string", "description": "New date in YYYY-MM-DD format"},
+                    "new_time": {"type": "string", "description": "New start time in HH:MM 24-hour format"}
+                },
+                "required": ["event_id", "new_date", "new_time"]
             }
         }
     }
@@ -339,12 +397,199 @@ def _send_email_notification(name: str, phone: str, email: str, dt: datetime.dat
         server.sendmail(gmail_user, NOTIFY_EMAIL, msg.as_string())
 
 
+def find_customer_booking(email: str) -> dict:
+    try:
+        service  = get_calendar_service()
+        now      = datetime.datetime.utcnow().isoformat() + "Z"
+        future   = (datetime.datetime.utcnow() + datetime.timedelta(days=90)).isoformat() + "Z"
+        result   = service.events().list(
+            calendarId=CALENDAR_ID, timeMin=now, timeMax=future,
+            q=email, singleEvents=True, orderBy="startTime"
+        ).execute()
+        events = result.get("items", [])
+        if not events:
+            return {"found": False, "message": f"No upcoming bookings found for {email}. Please double-check the email address."}
+
+        event = events[0]
+        start_raw = event["start"].get("dateTime", event["start"].get("date"))
+        dt = datetime.datetime.fromisoformat(start_raw.replace("Z", "+00:00")).astimezone(LONDON_TZ)
+
+        # Parse customer name from description
+        name = ""
+        for line in event.get("description", "").split("\n"):
+            if line.startswith("Customer:"):
+                name = line.replace("Customer:", "").strip()
+                break
+        if not name and " – " in event.get("summary", ""):
+            name = event["summary"].split(" – ", 1)[1].strip()
+
+        return {
+            "found":          True,
+            "event_id":       event["id"],
+            "summary":        event.get("summary", "Property Inspection"),
+            "customer_name":  name,
+            "formatted_date": dt.strftime("%A, %d %B %Y"),
+            "formatted_time": dt.strftime("%I:%M %p"),
+            "date":           dt.strftime("%Y-%m-%d"),
+            "time":           dt.strftime("%H:%M"),
+        }
+    except Exception as e:
+        print(f"[FIND BOOKING ERROR] {e}", flush=True)
+        return {"found": False, "message": f"Error searching bookings: {e}"}
+
+
+def cancel_customer_booking(event_id: str) -> dict:
+    try:
+        service = get_calendar_service()
+        event   = service.events().get(calendarId=CALENDAR_ID, eventId=event_id).execute()
+        start_raw = event["start"].get("dateTime", event["start"].get("date"))
+        dt = datetime.datetime.fromisoformat(start_raw.replace("Z", "+00:00")).astimezone(LONDON_TZ)
+
+        # Parse name
+        name = ""
+        for line in event.get("description", "").split("\n"):
+            if line.startswith("Customer:"):
+                name = line.replace("Customer:", "").strip()
+                break
+
+        service.events().delete(calendarId=CALENDAR_ID, eventId=event_id).execute()
+
+        try:
+            _send_cancel_email(name, dt, event.get("summary", "Property Inspection"))
+        except Exception as em_err:
+            print(f"[CANCEL EMAIL ERROR] {em_err}", flush=True)
+
+        return {
+            "success":  True,
+            "message":  f"Booking on {dt.strftime('%A, %d %B %Y')} at {dt.strftime('%I:%M %p')} has been cancelled successfully."
+        }
+    except Exception as e:
+        print(f"[CANCEL ERROR] {e}", flush=True)
+        return {"success": False, "message": f"Cancellation failed: {e}"}
+
+
+def reschedule_customer_booking(event_id: str, new_date: str, new_time: str) -> dict:
+    try:
+        service = get_calendar_service()
+        event   = service.events().get(calendarId=CALENDAR_ID, eventId=event_id).execute()
+
+        new_dt    = datetime.datetime.strptime(f"{new_date} {new_time}", "%Y-%m-%d %H:%M")
+        new_start = LONDON_TZ.localize(new_dt)
+        new_end   = new_start + datetime.timedelta(hours=SLOT_DURATION_H)
+
+        # Guard: check new slot is free
+        busy_check = service.freebusy().query(body={
+            "timeMin": new_start.isoformat(),
+            "timeMax": new_end.isoformat(),
+            "items":   [{"id": CALENDAR_ID}]
+        }).execute()
+        if busy_check.get("calendars", {}).get(CALENDAR_ID, {}).get("busy", []):
+            return {"success": False, "message": f"The {new_time} slot on {new_date} is already taken. Please check availability and pick another slot."}
+
+        # Get old datetime for email
+        old_raw = event["start"].get("dateTime", event["start"].get("date"))
+        old_dt  = datetime.datetime.fromisoformat(old_raw.replace("Z", "+00:00")).astimezone(LONDON_TZ)
+
+        # Parse name
+        name = ""
+        for line in event.get("description", "").split("\n"):
+            if line.startswith("Customer:"):
+                name = line.replace("Customer:", "").strip()
+                break
+
+        # Delete old, create new
+        service.events().delete(calendarId=CALENDAR_ID, eventId=event_id).execute()
+        service.events().insert(
+            calendarId=CALENDAR_ID,
+            body={
+                "summary":     event.get("summary", "Property Inspection"),
+                "description": event.get("description", "") + f"\n\nRescheduled from {old_dt.strftime('%A, %d %B %Y at %I:%M %p')}",
+                "start": {"dateTime": new_start.isoformat(), "timeZone": "Europe/London"},
+                "end":   {"dateTime": new_end.isoformat(),   "timeZone": "Europe/London"},
+                "reminders": {
+                    "useDefault": False,
+                    "overrides": [{"method": "email", "minutes": 60}, {"method": "popup", "minutes": 30}]
+                }
+            }
+        ).execute()
+
+        try:
+            _send_reschedule_email(name, old_dt, new_start)
+        except Exception as em_err:
+            print(f"[RESCHEDULE EMAIL ERROR] {em_err}", flush=True)
+
+        return {
+            "success":        True,
+            "formatted_date": new_start.strftime("%A, %d %B %Y"),
+            "formatted_time": new_start.strftime("%I:%M %p"),
+            "name":           name
+        }
+    except Exception as e:
+        print(f"[RESCHEDULE ERROR] {e}", flush=True)
+        return {"success": False, "message": f"Reschedule failed: {e}"}
+
+
+def _send_cancel_email(name: str, dt: datetime.datetime, summary: str = "Property Inspection"):
+    gmail_user, gmail_pw = os.getenv("GMAIL_SENDER"), os.getenv("GMAIL_APP_PASSWORD")
+    if not gmail_user or not gmail_pw:
+        raise ValueError("GMAIL credentials not set")
+    html = f"""
+    <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;border:1px solid #e0e0e0;border-radius:8px;overflow:hidden;">
+      <div style="background:#dc2626;padding:20px 24px;"><h2 style="color:#fff;margin:0">❌ Booking Cancelled</h2></div>
+      <div style="padding:24px;background:#f9f9f9;">
+        <table style="width:100%;border-collapse:collapse;">
+          <tr><td style="padding:8px 0;color:#555;width:120px;">👤 Name</td><td style="padding:8px 0;font-weight:bold;">{name or 'N/A'}</td></tr>
+          <tr><td style="padding:8px 0;color:#555;">🔧 Service</td><td style="padding:8px 0;">{summary}</td></tr>
+          <tr><td style="padding:8px 0;color:#555;">📅 Was booked</td><td style="padding:8px 0;">{dt.strftime('%A, %d %B %Y')}</td></tr>
+          <tr><td style="padding:8px 0;color:#555;">⏰ Time</td><td style="padding:8px 0;">{dt.strftime('%I:%M %p')}</td></tr>
+        </table>
+      </div>
+      <div style="padding:12px 24px;background:#fee2e2;font-size:13px;color:#555;">Cancelled via Environ website chatbot.</div>
+    </div>"""
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"❌ Booking Cancelled – {name or 'Customer'} | {dt.strftime('%d %b %Y')}"
+    msg["From"] = gmail_user; msg["To"] = NOTIFY_EMAIL
+    msg.attach(MIMEText(html, "html"))
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+        s.login(gmail_user, gmail_pw); s.sendmail(gmail_user, NOTIFY_EMAIL, msg.as_string())
+
+
+def _send_reschedule_email(name: str, old_dt: datetime.datetime, new_dt: datetime.datetime):
+    gmail_user, gmail_pw = os.getenv("GMAIL_SENDER"), os.getenv("GMAIL_APP_PASSWORD")
+    if not gmail_user or not gmail_pw:
+        raise ValueError("GMAIL credentials not set")
+    html = f"""
+    <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;border:1px solid #e0e0e0;border-radius:8px;overflow:hidden;">
+      <div style="background:#d97706;padding:20px 24px;"><h2 style="color:#fff;margin:0">🔄 Booking Rescheduled</h2></div>
+      <div style="padding:24px;background:#f9f9f9;">
+        <table style="width:100%;border-collapse:collapse;">
+          <tr><td style="padding:8px 0;color:#555;width:140px;">👤 Name</td><td style="padding:8px 0;font-weight:bold;">{name or 'N/A'}</td></tr>
+          <tr><td style="padding:8px 0;color:#555;">❌ Was</td><td style="padding:8px 0;text-decoration:line-through;color:#9ca3af;">{old_dt.strftime('%A, %d %B %Y at %I:%M %p')}</td></tr>
+          <tr><td style="padding:8px 0;color:#555;">✅ Now</td><td style="padding:8px 0;font-weight:bold;color:#15803d;">{new_dt.strftime('%A, %d %B %Y at %I:%M %p')}</td></tr>
+        </table>
+      </div>
+      <div style="padding:12px 24px;background:#fef3c7;font-size:13px;color:#555;">Rescheduled via Environ website chatbot.</div>
+    </div>"""
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"🔄 Booking Rescheduled – {name or 'Customer'} | {new_dt.strftime('%d %b %Y')}"
+    msg["From"] = gmail_user; msg["To"] = NOTIFY_EMAIL
+    msg.attach(MIMEText(html, "html"))
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+        s.login(gmail_user, gmail_pw); s.sendmail(gmail_user, NOTIFY_EMAIL, msg.as_string())
+
+
 def execute_tool(name: str, args: dict) -> dict:
     try:
         if name == "check_availability":
             return check_calendar_availability(args["date"])
         if name == "book_appointment":
             return create_calendar_booking(args)
+        if name == "find_booking":
+            return find_customer_booking(args["email"])
+        if name == "cancel_booking":
+            return cancel_customer_booking(args["event_id"])
+        if name == "reschedule_booking":
+            return reschedule_customer_booking(args["event_id"], args["new_date"], args["new_time"])
         return {"error": "Unknown tool"}
     except Exception as e:
         return {"error": str(e), "available": False, "slots": []}
