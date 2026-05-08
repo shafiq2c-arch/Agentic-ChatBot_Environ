@@ -758,7 +758,8 @@ async def chat(req: ChatRequest):
             ui_events    = []   # deferred UI events sent after text stream
 
             for tc in msg.tool_calls:
-                result = execute_tool(tc.function.name, json.loads(tc.function.arguments))
+                args   = json.loads(tc.function.arguments)
+                result = execute_tool(tc.function.name, args)
 
                 # Queue a slot-picker UI event for the frontend
                 if tc.function.name == "check_availability" and result.get("slots"):
@@ -768,6 +769,18 @@ async def chat(req: ChatRequest):
                         "formatted_date": result.get("formatted_date", result["date"]),
                         "slots":          result["slots"]
                     })
+
+                # If slot just taken — auto re-check availability so buttons appear
+                if tc.function.name == "book_appointment" and result.get("error") == "slot_taken":
+                    avail = check_calendar_availability(args["date"])
+                    if avail.get("slots"):
+                        ui_events.append({
+                            "ui":             "slots",
+                            "date":           avail["date"],
+                            "formatted_date": avail.get("formatted_date", avail["date"]),
+                            "slots":          avail["slots"]
+                        })
+                        result["new_availability"] = avail  # give AI the fresh slots in its context
 
                 tool_results.append({
                     "role": "tool",
