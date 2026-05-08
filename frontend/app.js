@@ -1,7 +1,7 @@
 'use strict';
 
 // ── Session constants ──────────────────────────────
-const MAX_TURNS = 15;   // show WhatsApp card after this many user turns (if no booking)
+const MAX_TURNS = 20;   // show WhatsApp card after this many user turns (if no booking)
 const WA_NUMBER = '447341650417';
 const WA_TEXT   = encodeURIComponent('Hi! I need help with my property enquiry.');
 
@@ -301,8 +301,37 @@ function renderMarkdown(raw) {
   const lines = text.split('\n');
   const out = [];
   let listType = null;
+  let tableLines = [];
+
   function closeList() { if (listType) { out.push(`</${listType}>`); listType = null; } }
+  function closeTable() {
+    if (!tableLines.length) return;
+    // Split each row into cells, filter empty edges from leading/trailing |
+    const rows = tableLines.map(l =>
+      l.split('|').map(c => c.trim()).filter((c, i, a) => i !== 0 || c !== '' || a.length > 2 ? true : c !== '')
+       .filter(c => c !== '' || tableLines.length === 1)
+    ).map(r => r.filter(c => c !== ''));
+    // Drop separator rows (e.g. |---|---|) and rows with no cells
+    const dataRows = rows.filter(r => r.length > 0 && !r.every(c => /^[-:]+$/.test(c)));
+    if (dataRows.length) {
+      out.push('<table class="md-table">');
+      dataRows.forEach((row, i) => {
+        const tag = i === 0 ? 'th' : 'td';
+        out.push('<tr>' + row.map(c => `<${tag}>${applyInline(c)}</${tag}>`).join('') + '</tr>');
+      });
+      out.push('</table>');
+    }
+    tableLines = [];
+  }
+
   for (const line of lines) {
+    // Table rows start with |
+    if (line.trim().startsWith('|')) {
+      closeList();
+      tableLines.push(line.trim());
+      continue;
+    }
+    closeTable();
     if (line.startsWith('### ')) { closeList(); out.push(`<h4>${applyInline(line.slice(4))}</h4>`); continue; }
     if (line.startsWith('## '))  { closeList(); out.push(`<h3>${applyInline(line.slice(3))}</h3>`); continue; }
     if (/^[-•*] /.test(line)) {
@@ -318,6 +347,7 @@ function renderMarkdown(raw) {
     closeList();
     line.trim() === '' ? out.push('<br>') : out.push(`<p>${applyInline(line)}</p>`);
   }
+  closeTable();
   closeList();
   return out.join('');
 }

@@ -234,6 +234,13 @@ body {
 .bot-bubble li          { margin: 4px 0; }
 .bot-bubble br          { content: ''; display: block; margin: 3px 0; }
 
+/* ── Markdown table ───────────────────────────────── */
+.md-table               { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin: 8px 0; border-radius: 6px; overflow: hidden; }
+.md-table th            { background: #1a6b3c; color: #fff; font-weight: 600; padding: 7px 10px; text-align: left; }
+.md-table td            { padding: 6px 10px; border-bottom: 1px solid #d1fae5; color: #1a2e1a; }
+.md-table tr:last-child td { border-bottom: none; }
+.md-table tr:nth-child(even) td { background: #f0f9f2; }
+
 .phone-link {
   color: #15803d;
   font-weight: 700;

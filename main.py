@@ -707,6 +707,36 @@ def validate_input(message: str) -> dict:
                 "What can I help you with today? 😊"
             )}
 
+    # 7. Profanity / abusive language
+    _PROFANITY = [
+        r'\bf[\*u][c\*]k', r'\bs[h\*][i\*]t\b', r'\bb[i\*]tch\b',
+        r'\bc[u\*]nt\b',   r'\bwanker\b',        r'\btwat\b',
+        r'\bdickhead\b',   r'\bprick\b',          r'\barshole\b',
+        r'\bcocksucker',   r'\bmotherfuck',       r'\bfucking\b',
+        r'\bshitting\b',   r'\bbullshit\b',
+    ]
+    if any(re.search(p, s_lower) for p in _PROFANITY):
+        return {"ok": False, "reply": (
+            "Please keep the conversation respectful and I'll be happy to help "
+            "with your property needs! 😊"
+        )}
+
+    # 8. URL / link injection (prevent phishing links in chat)
+    if re.search(r'https?://', s_lower):
+        return {"ok": False, "reply": (
+            "Please don't include web links in your message. Just describe your "
+            "property issue in your own words and I'll help you out!"
+        )}
+
+    # 9. Excessive symbols / special-character spam
+    #    If more than 55% of characters are non-alphanumeric (excl. spaces & common punctuation)
+    symbols = sum(1 for c in s if not c.isalnum() and c not in " .,!?'-@:/()")
+    if len(s) > 10 and symbols / max(len(s), 1) > 0.55:
+        return {"ok": False, "reply": (
+            "That message contains too many special characters. "
+            "Please describe your property issue in plain English and I'll help you out!"
+        )}
+
     return {"ok": True}
 
 
@@ -717,6 +747,13 @@ def validate_output(text: str) -> str:
     """
     if not text:
         return text
+
+    # 0. Strip literal HTML tags that GPT-4o sometimes outputs (e.g. <br> inside table cells)
+    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(
+        r'</?(?:b|i|u|em|strong|span|div|p|table|tr|td|th|thead|tbody|hr)\b[^>]*>',
+        '', text, flags=re.IGNORECASE
+    )
 
     # 1. Non-English output — GPT-4o should never do this, but safety net
     non_latin = sum(1 for c in text if c.isalpha() and ord(c) > 591)
