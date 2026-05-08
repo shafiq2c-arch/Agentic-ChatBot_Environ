@@ -47,7 +47,7 @@ PRIMARY GOAL: Help users understand their property issue, then guide them toward
 
 BOOKING FLOW — follow this order strictly:
 1. If user says "book", "book a meeting", "I want a booking" or similar WITHOUT specifying a service — ask: "Sure! What service do you need? For example: damp survey, mould removal, rot treatment, repointing, roofing, drainage, pest control, or something else?"
-2. Once you know the service, ask 1 quick question about their issue to understand it better
+2. Once you know the service, ask: "Could you briefly describe the issue you're facing? (e.g. damp patches on walls, black mould in bathroom, leaking roof)" — get a clear 1-2 sentence description
 3. Suggest a free inspection — "I can check our availability for a free site visit — which day works for you?"
 4. Check availability — if they say "ASAP", "any day", "earliest", check today then tomorrow automatically. If they give a relative date ("next Monday", "in 3 days") calculate it from today's date and call check_availability
 5. Show available slots, ask them to pick one. Only accept a slot from the list you showed
@@ -59,6 +59,7 @@ BOOKING FLOW — follow this order strictly:
    📧 Email: [email]
    📅 [Day, Date] at [Time]
    🔧 Service: [service]
+   ⚠️ Issue: [issue description]
    Shall I confirm this booking?"
 8. Only call book_appointment AFTER user confirms
 9. After booking: "✅ You're booked! See you on [date] at [time], [name]."
@@ -118,9 +119,10 @@ TOOLS = [
                     "name":    {"type": "string", "description": "Customer full name"},
                     "phone":   {"type": "string", "description": "Customer phone number"},
                     "email":   {"type": "string", "description": "Customer email address"},
-                    "service": {"type": "string", "description": "Service requested e.g. damp survey, mould removal, roofing"}
+                    "service": {"type": "string", "description": "Service requested e.g. damp survey, mould removal, roofing"},
+                    "issue":   {"type": "string", "description": "Brief description of the property issue the customer is facing"}
                 },
-                "required": ["date", "time", "name", "phone", "email", "service"]
+                "required": ["date", "time", "name", "phone", "email", "service", "issue"]
             }
         }
     }
@@ -238,7 +240,14 @@ def create_calendar_booking(args: dict) -> dict:
             calendarId=CALENDAR_ID,
             body={
                 "summary":     f"{args.get('service','Property Inspection')} – {args['name']}",
-                "description": f"Customer: {args['name']}\nPhone: {args['phone']}\nEmail: {args['email']}\nService: {args.get('service','N/A')}\n\nBooked via Environ chatbot.",
+                "description": (
+                    f"Customer: {args['name']}\n"
+                    f"Phone: {args['phone']}\n"
+                    f"Email: {args['email']}\n"
+                    f"Service: {args.get('service','N/A')}\n"
+                    f"Issue: {args.get('issue','N/A')}\n\n"
+                    f"Booked via Environ chatbot."
+                ),
                 "start": {"dateTime": start.isoformat(), "timeZone": "Europe/London"},
                 "end":   {"dateTime": end.isoformat(),   "timeZone": "Europe/London"},
                 "reminders": {
@@ -251,7 +260,7 @@ def create_calendar_booking(args: dict) -> dict:
             }
         ).execute()
 
-        _send_whatsapp(args["name"], args["phone"], args["email"], start, args.get("service", "Property Inspection"))
+        _send_whatsapp(args["name"], args["phone"], args["email"], start, args.get("service", "Property Inspection"), args.get("issue", "N/A"))
 
         return {
             "success": True,
@@ -263,13 +272,14 @@ def create_calendar_booking(args: dict) -> dict:
         return {"success": False, "error": str(e)}
 
 
-def _send_whatsapp(name: str, phone: str, email: str, dt: datetime.datetime, service: str = "Property Inspection"):
+def _send_whatsapp(name: str, phone: str, email: str, dt: datetime.datetime, service: str = "Property Inspection", issue: str = "N/A"):
     body = (
         f"🏠 *New Booking – Environ Property Services*\n\n"
         f"👤 Name: {name}\n"
         f"📱 Phone: {phone}\n"
-        f"📧 Email: {email}\n"
-        f"🔧 Service: {service}\n\n"
+        f"📧 Email: {email}\n\n"
+        f"🔧 Service: {service}\n"
+        f"⚠️ Issue: {issue}\n\n"
         f"📅 Date: {dt.strftime('%A, %d %B %Y')}\n"
         f"⏰ Time: {dt.strftime('%I:%M %p')}\n\n"
         f"Booked via website chatbot."
