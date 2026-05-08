@@ -53,7 +53,8 @@ BOOKING APPROACH:
 - Present available slots clearly, ask them to pick one
 - IMPORTANT: Only accept a time the user picks from the slots you showed them. If they pick a time not in the list, politely say it's not available and ask them to pick from the shown slots
 - Then collect: full name, phone number, email address (ask naturally, not all at once)
-- Once you have all three, call book_appointment
+- Validate before booking: email MUST contain @ and a dot (e.g. name@gmail.com). Phone MUST be a real number with at least 7 digits. If either looks fake or invalid, ask again before calling book_appointment
+- Once you have all three valid details, call book_appointment
 - Confirm warmly: "✅ You're booked! See you on [date] at [time], [name]."
 
 DATE RULES:
@@ -190,6 +191,18 @@ def check_calendar_availability(date_str: str) -> dict:
 
 
 def create_calendar_booking(args: dict) -> dict:
+    import re
+    # Validate email
+    email = args.get("email", "")
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+        return {"success": False, "error": "invalid_email", "message": "That doesn't look like a valid email address. Please ask the customer to provide a valid email (e.g. name@example.com)."}
+
+    # Validate phone — must have at least 7 digits
+    phone = args.get("phone", "")
+    digits = re.sub(r"\D", "", phone)
+    if len(digits) < 7:
+        return {"success": False, "error": "invalid_phone", "message": "That doesn't look like a valid phone number. Please ask the customer to provide a valid phone number."}
+
     try:
         dt    = datetime.datetime.strptime(f"{args['date']} {args['time']}", "%Y-%m-%d %H:%M")
         start = LONDON_TZ.localize(dt)
