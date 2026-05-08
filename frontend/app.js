@@ -3,6 +3,63 @@
 let conversationHistory = [];
 let selectedImage = null;
 
+// ── Voice input (Web Speech API — free, Chrome/Edge) ─
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognition  = null;
+let isRecording  = false;
+
+function initVoice() {
+  const btn = document.getElementById('micBtn');
+  if (!SpeechRecognition) { btn.style.display = 'none'; return; }
+
+  recognition = new SpeechRecognition();
+  recognition.lang            = 'en-GB';
+  recognition.continuous      = false;
+  recognition.interimResults  = true;
+
+  recognition.onstart = () => {
+    isRecording = true;
+    btn.classList.add('recording');
+    document.getElementById('messageInput').placeholder = '🎙️ Listening…';
+  };
+
+  recognition.onresult = (e) => {
+    const transcript = Array.from(e.results).map(r => r[0].transcript).join('');
+    const input = document.getElementById('messageInput');
+    input.value = transcript;
+    autoResize(input);
+  };
+
+  recognition.onend = () => {
+    isRecording = false;
+    btn.classList.remove('recording');
+    document.getElementById('messageInput').placeholder = 'Describe your property issue or ask a question…';
+    const input = document.getElementById('messageInput');
+    if (input.value.trim()) input.focus();
+  };
+
+  recognition.onerror = (e) => {
+    isRecording = false;
+    btn.classList.remove('recording');
+    document.getElementById('messageInput').placeholder = 'Describe your property issue or ask a question…';
+    if (e.error === 'not-allowed') {
+      alert('Microphone access denied. Please allow microphone in your browser settings and try again.');
+    }
+  };
+}
+
+function toggleVoice() {
+  if (!recognition) return;
+  if (isRecording) {
+    recognition.stop();
+  } else {
+    document.getElementById('messageInput').value = '';
+    recognition.start();
+  }
+}
+
+initVoice();
+
 // ── Auto-resize textarea ──────────────────────────
 function autoResize(el) {
   el.style.height = 'auto';
