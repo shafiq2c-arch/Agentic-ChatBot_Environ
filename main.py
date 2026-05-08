@@ -21,7 +21,6 @@ import chromadb
 from openai import OpenAI
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from twilio.rest import Client as TwilioClient
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -30,8 +29,6 @@ load_dotenv()
 CHROMA_PATH        = "./chroma_db"
 COLLECTION_NAME    = "environ_knowledge"
 CALENDAR_ID        = "shafiq2c2c@gmail.com"
-NOTIFY_WA_NUMBER   = "+923365579579"
-TWILIO_FROM        = "whatsapp:+14155238886"
 LONDON_TZ          = pytz.timezone("Europe/London")
 WORK_START_H       = 9   # 9 AM
 WORK_END_H         = 18  # 6 PM
@@ -276,16 +273,10 @@ def create_calendar_booking(args: dict) -> dict:
             }
         ).execute()
 
-        # Notifications are best-effort — never block the booking if they fail
+        # Email notification is best-effort — never block the booking if it fails
         notes = []
         svc   = args.get("service", "Property Inspection")
         issue = args.get("issue", "N/A")
-
-        try:
-            _send_whatsapp(args["name"], args["phone"], args["email"], start, svc, issue)
-        except Exception as wa_err:
-            print(f"[WHATSAPP ERROR] {wa_err}", flush=True)
-            notes.append(f"WhatsApp failed: {wa_err}")
 
         try:
             _send_email_notification(args["name"], args["phone"], args["email"], start, svc, issue)
@@ -303,28 +294,6 @@ def create_calendar_booking(args: dict) -> dict:
     except Exception as e:
         print(f"[BOOKING ERROR] {e}", flush=True)
         return {"success": False, "error": str(e), "message": f"Booking failed: {e}"}
-
-
-def _send_whatsapp(name: str, phone: str, email: str, dt: datetime.datetime, service: str = "Property Inspection", issue: str = "N/A"):
-    body = (
-        f"🏠 *New Booking – Environ Property Services*\n\n"
-        f"👤 Name: {name}\n"
-        f"📱 Phone: {phone}\n"
-        f"📧 Email: {email}\n\n"
-        f"🔧 Service: {service}\n"
-        f"⚠️ Issue: {issue}\n\n"
-        f"📅 Date: {dt.strftime('%A, %d %B %Y')}\n"
-        f"⏰ Time: {dt.strftime('%I:%M %p')}\n\n"
-        f"Booked via website chatbot."
-    )
-    TwilioClient(
-        os.getenv("TWILIO_ACCOUNT_SID"),
-        os.getenv("TWILIO_AUTH_TOKEN")
-    ).messages.create(
-        from_=TWILIO_FROM,
-        to=f"whatsapp:{NOTIFY_WA_NUMBER}",
-        body=body
-    )
 
 
 def _send_email_notification(name: str, phone: str, email: str, dt: datetime.datetime,
