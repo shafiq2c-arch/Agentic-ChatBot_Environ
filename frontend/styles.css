@@ -620,11 +620,61 @@ body {
 
 .slot-btn { min-width: 72px; }
 
+/* ── New Chat button ──────────────────────────────── */
+.hdr-new-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  background: transparent;
+  border: 1.5px solid rgba(255,255,255,0.3);
+  border-radius: 20px;
+  color: rgba(255,255,255,0.85);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+  white-space: nowrap;
+}
+.hdr-new-btn:hover {
+  background: rgba(255,255,255,0.12);
+  border-color: rgba(255,255,255,0.5);
+}
+
+/* ── WhatsApp escalation card ─────────────────────── */
+.wa-bubble {
+  background: #f0fdf4 !important;
+  border: 1.5px solid #bbf7d0 !important;
+}
+
+.wa-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px 20px;
+  background: #25d366;
+  color: #fff !important;
+  border-radius: 24px;
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none !important;
+  transition: background 0.2s, transform 0.15s;
+  box-shadow: 0 2px 8px rgba(37,211,102,0.35);
+}
+.wa-btn:hover {
+  background: #1ebe5d;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(37,211,102,0.45);
+}
+
 /* ── Responsive ───────────────────────────────────── */
 @media (max-width: 600px) {
   .header              { padding: 8px 12px; }
   .header-text h1      { font-size: 0.85rem; }
   .header-text p       { font-size: 0.66rem; }
+  .hdr-new-btn span    { display: none; }
+  .hdr-new-btn         { padding: 8px 10px; border-radius: 50%; }
   .hdr-book-btn span   { display: none; }
   .hdr-book-btn        { padding: 8px 10px; border-radius: 50%; }
   .hdr-book-btn svg    { width: 17px; height: 17px; }

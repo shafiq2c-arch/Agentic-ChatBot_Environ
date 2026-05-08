@@ -618,6 +618,7 @@ class ChatRequest(BaseModel):
     image_base64: Optional[str] = None
     image_mime_type: Optional[str] = "image/jpeg"
     history: list[HistoryMessage] = []
+    session_id: Optional[str] = None   # for future logging/tracking
 
 
 def extract_booking_state(history: list) -> str:
