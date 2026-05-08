@@ -524,6 +524,68 @@ body {
   box-shadow: 0 6px 20px rgba(21,128,61,0.4);
 }
 
+/* ── Date / Slot pickers ──────────────────────────── */
+.picker-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 2px 0 2px 43px;
+  animation: msgIn 0.32s cubic-bezier(0.34,1.46,0.64,1) both;
+}
+
+.picker-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 58px;
+  padding: 10px 13px;
+  border-radius: 14px;
+  border: 1.5px solid rgba(134,239,172,0.75);
+  background: rgba(255,255,255,0.9);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.2s cubic-bezier(0.34,1.56,0.64,1);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+}
+
+.picker-btn:hover {
+  background: linear-gradient(135deg,#15803d 0%,#22c55e 100%);
+  border-color: transparent;
+  transform: translateY(-2px) scale(1.06);
+  box-shadow: 0 6px 18px rgba(21,128,61,0.38);
+}
+
+.picker-btn:hover .picker-main,
+.picker-btn:hover .picker-sub { color: #fff; }
+
+.picker-btn:active { transform: scale(0.95); }
+
+.picker-main {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #14532d;
+  line-height: 1.2;
+}
+
+.picker-sub {
+  font-size: 0.66rem;
+  font-weight: 500;
+  color: #6b7280;
+  margin-top: 2px;
+  line-height: 1;
+}
+
+.picker-other {
+  border-style: dashed;
+  opacity: 0.72;
+}
+.picker-other:hover { opacity: 1; }
+
+.slot-btn { min-width: 72px; }
+
 /* ── Responsive ───────────────────────────────────── */
 @media (max-width: 600px) {
   .header              { padding: 8px 12px; }
@@ -536,4 +598,7 @@ body {
   .input-area          { padding: 8px 10px; }
   .message-bubble      { font-size: 0.83rem; }
   .quick-chips         { padding-left: 0; }
+  .picker-row          { padding-left: 0; }
+  .picker-btn          { min-width: 52px; padding: 9px 10px; }
+  .slot-btn            { min-width: 64px; }
 }

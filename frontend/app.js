@@ -46,6 +46,88 @@ function removeImage() {
   document.getElementById('imageInput').value = '';
 }
 
+// ── Date / Slot pickers ───────────────────────────
+function removePickers() {
+  ['datePicker', 'slotPicker'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.remove();
+  });
+}
+
+function getNext8WorkingDays() {
+  const SHORT_DAY   = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const SHORT_MON   = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const FULL_DAY    = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+  const FULL_MON    = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const result = [];
+  const d = new Date();
+  d.setDate(d.getDate() + 1); // start tomorrow
+  while (result.length < 8) {
+    if (d.getDay() !== 0) { // skip Sunday
+      const dd   = String(d.getDate()).padStart(2,'0');
+      const mm   = String(d.getMonth()+1).padStart(2,'0');
+      const yyyy = d.getFullYear();
+      result.push({
+        day:   SHORT_DAY[d.getDay()],
+        short: `${d.getDate()} ${SHORT_MON[d.getMonth()]}`,
+        full:  `${FULL_DAY[d.getDay()]}, ${dd} ${FULL_MON[d.getMonth()]} ${yyyy}`,
+        iso:   `${yyyy}-${mm}-${dd}`
+      });
+    }
+    d.setDate(d.getDate() + 1);
+  }
+  return result;
+}
+
+function showDatePicker() {
+  if (document.getElementById('datePicker')) return;
+  const chatArea = document.getElementById('chatArea');
+  const row = document.createElement('div');
+  row.id = 'datePicker';
+  row.className = 'picker-row';
+
+  getNext8WorkingDays().forEach(d => {
+    const btn = document.createElement('button');
+    btn.className = 'picker-btn';
+    btn.innerHTML = `<span class="picker-main">${d.day}</span><span class="picker-sub">${d.short}</span>`;
+    btn.onclick = () => { removePickers(); document.getElementById('messageInput').value = d.full; sendMessage(); };
+    row.appendChild(btn);
+  });
+
+  // "Other date" button
+  const other = document.createElement('button');
+  other.className = 'picker-btn picker-other';
+  other.innerHTML = `<span class="picker-main">✏️</span><span class="picker-sub">Other</span>`;
+  other.onclick = () => { removePickers(); document.getElementById('messageInput').focus(); };
+  row.appendChild(other);
+
+  chatArea.appendChild(row);
+  scrollToBottom();
+}
+
+function showSlotPicker(slots) {
+  removePickers();
+  const chatArea = document.getElementById('chatArea');
+  const row = document.createElement('div');
+  row.id = 'slotPicker';
+  row.className = 'picker-row';
+
+  slots.forEach(slot => {
+    const [h, m] = slot.split(':');
+    const hour = parseInt(h);
+    const ampm = hour >= 12 ? 'PM' : 'AM';
+    const h12  = hour % 12 || 12;
+    const btn  = document.createElement('button');
+    btn.className = 'picker-btn slot-btn';
+    btn.innerHTML = `<span class="picker-main">${h12}:${m}</span><span class="picker-sub">${ampm}</span>`;
+    btn.onclick = () => { removePickers(); document.getElementById('messageInput').value = slot; sendMessage(); };
+    row.appendChild(btn);
+  });
+
+  chatArea.appendChild(row);
+  scrollToBottom();
+}
+
 // ── Quick suggestion chips ────────────────────────
 function sendChip(el) {
   const chips = document.getElementById('quickChips');
@@ -272,6 +354,10 @@ async function sendMessage() {
         try {
           const parsed = JSON.parse(payload);
           if (parsed.error) throw new Error(parsed.error);
+
+          // Interactive UI events
+          if (parsed.ui === 'slots') { showSlotPicker(parsed.slots); continue; }
+
           if (parsed.token) {
             fullText += parsed.token;
             bubble.innerHTML = renderMarkdown(fullText) + '<span class="cursor-blink">▍</span>';
@@ -285,6 +371,17 @@ async function sendMessage() {
 
     // Finalise — remove cursor, render clean markdown
     bubble.innerHTML = renderMarkdown(fullText);
+
+    // Show date picker if bot is asking the user to choose a day
+    const DATE_TRIGGERS = ['which day','what day','when would you','day works','day suits',
+                           'prefer a day','choose a day','pick a day','what date','which date'];
+    if (DATE_TRIGGERS.some(t => fullText.toLowerCase().includes(t))) {
+      showDatePicker();
+    }
+    // Remove pickers once booking is confirmed
+    if (fullText.includes("You're booked") || fullText.includes("you're booked") || fullText.includes('✅')) {
+      removePickers();
+    }
 
     // Update history
     conversationHistory.push({ role: 'user', content: effectiveMessage });

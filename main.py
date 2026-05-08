@@ -67,6 +67,7 @@ BOOKING FLOW — follow this order strictly:
 9. After booking: "✅ You're booked! See you on [date] at [time], [name]."
 
 IMPORTANT RULES:
+- When check_availability returns slots, DO NOT list the times in text — they appear as clickable buttons automatically. Just say: "We have availability on [formatted_date]! Please pick a time 👇"
 - Never ask for name/phone/email before a slot is chosen
 - Never ask for something the user already provided in this conversation
 - Do NOT validate phone or email yourself — just collect and call book_appointment
@@ -429,8 +430,20 @@ async def chat(req: ChatRequest):
             # Step 2: execute every tool call
             msg = choice.message
             tool_results = []
+            ui_events    = []   # deferred UI events sent after text stream
+
             for tc in msg.tool_calls:
                 result = execute_tool(tc.function.name, json.loads(tc.function.arguments))
+
+                # Queue a slot-picker UI event for the frontend
+                if tc.function.name == "check_availability" and result.get("slots"):
+                    ui_events.append({
+                        "ui":             "slots",
+                        "date":           result["date"],
+                        "formatted_date": result.get("formatted_date", result["date"]),
+                        "slots":          result["slots"]
+                    })
+
                 tool_results.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
@@ -453,7 +466,7 @@ async def chat(req: ChatRequest):
                 }
             ] + tool_results
 
-            # Step 3: stream final response after tool execution
+            # Step 3: stream text response first
             stream = openai_client.chat.completions.create(
                 model=model,
                 messages=follow_up,
@@ -465,6 +478,10 @@ async def chat(req: ChatRequest):
                 delta = chunk.choices[0].delta.content
                 if delta:
                     yield f"data: {json.dumps({'token': delta})}\n\n"
+
+            # Step 4: after text, emit UI events so buttons appear below the bubble
+            for evt in ui_events:
+                yield f"data: {json.dumps(evt)}\n\n"
 
         else:
             # No tool call — stream the response we already have word-by-word
