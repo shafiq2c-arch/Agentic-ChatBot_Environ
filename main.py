@@ -49,6 +49,7 @@ You are a CUSTOMER SUPPORT assistant first. Your job is to:
 - Let the CUSTOMER lead the conversation — never push or pressurise them
 
 STYLE: Friendly and helpful. 2-4 sentences or short bullet points. No jargon. No long paragraphs.
+Use bullet points by default. Only use a markdown table if the user explicitly asks for one — and keep it concise (max 6 rows).
 
 ━━━ BOOKING — ONLY WHEN THE CUSTOMER WANTS IT ━━━
 NEVER push or force the booking. Only enter the booking flow when the customer clearly expresses interest (e.g. "I'd like to book", "can I make an appointment", "how do I book", "can someone come out").
@@ -707,7 +708,22 @@ def validate_input(message: str) -> dict:
                 "What can I help you with today? 😊"
             )}
 
-    # 7. Profanity / abusive language
+    # 7. Format-forcing / data-format demands (not relevant to a property chatbot)
+    _FORMAT_PATTERNS = [
+        r'\b(?:as|in|using)\s+(?:json|xml|csv|html|yaml|code|markdown|latex)\b',
+        r'\bformat(?:ted)?\s+(?:as|in)\b',
+        r'\bwrite\s+(?:a\s+)?(?:script|code|program|function)\b',
+        r'\bshow\s+(?:me\s+)?(?:the\s+)?(?:source|html|css|code)\b',
+        r'\bexport\s+(?:as|to)\b',
+        r'\bprint\s+(?:in|as)\s+(?:json|xml|csv)\b',
+    ]
+    if any(re.search(p, s_lower) for p in _FORMAT_PATTERNS):
+        return {"ok": False, "reply": (
+            "I'm a property support assistant — I can't output data in technical formats like JSON, XML or code. "
+            "I'm happy to explain services, causes, treatments, or help you book an inspection. What would you like to know? 😊"
+        )}
+
+    # 8. Profanity / abusive language
     _PROFANITY = [
         r'\bf[\*u][c\*]k', r'\bs[h\*][i\*]t\b', r'\bb[i\*]tch\b',
         r'\bc[u\*]nt\b',   r'\bwanker\b',        r'\btwat\b',
