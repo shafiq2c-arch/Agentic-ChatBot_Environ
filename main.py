@@ -662,6 +662,55 @@ def extract_booking_state(history: list) -> str:
         if re.match(r"^\d{1,2}:\d{2}$", next_val.strip()):
             collected["time_slot"] = next_val.strip()
 
+    # ── FALLBACK: extract service from any user message ──
+    # Handles the case where user mentions service upfront (e.g. "I want to book a damp survey")
+    # without the bot ever asking "What service do you need?"
+    if "service" not in collected:
+        SERVICE_KEYWORDS = [
+            "damp survey", "damp proofing", "damp inspection", "damp treatment", "damp check",
+            "mould removal", "mould treatment", "mould survey", "mold removal", "mold treatment",
+            "dry rot", "wet rot", "rot treatment", "rot survey",
+            "repointing", "brick cleaning", "pointing",
+            "roofing", "roof repair", "roof inspection", "roof survey",
+            "drainage", "drain survey", "drain inspection",
+            "sash window", "window repair", "window survey",
+            "pest control", "pest inspection",
+            "waterproofing", "basement conversion",
+            "condensation survey", "rising damp", "penetrating damp", "lateral damp",
+            "property inspection", "property survey", "free inspection", "free survey",
+        ]
+        for msg_role, msg_content in msgs:
+            if msg_role != "user":
+                continue
+            content_lower = msg_content.lower()
+            for kw in SERVICE_KEYWORDS:
+                if kw in content_lower:
+                    collected["service"] = kw.title()
+                    break
+            if "service" in collected:
+                break
+
+    # ── FALLBACK: extract time slot from any user message ──
+    # Handles cases where "11:00" was sent as a button click after a bot message
+    # that didn't explicitly ask for time in a detectable way
+    if "time_slot" not in collected:
+        for msg_role, msg_content in msgs:
+            if msg_role == "user" and re.match(r"^\d{1,2}:\d{2}$", msg_content.strip()):
+                collected["time_slot"] = msg_content.strip()
+
+    # ── FALLBACK: extract date from any user message ──
+    # Handles date button clicks like "Monday, 11 May 2026"
+    if "date_chosen" not in collected:
+        DATE_PATTERN = re.compile(
+            r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday)"
+            r"[,\s]+\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\S*\s+\d{4}\b",
+            re.IGNORECASE
+        )
+        for msg_role, msg_content in msgs:
+            if msg_role == "user" and DATE_PATTERN.search(msg_content):
+                collected["date_chosen"] = msg_content.strip()
+                break
+
     if not collected:
         return ""
 
@@ -717,8 +766,11 @@ def build_messages(req: ChatRequest) -> tuple[list, str]:
         messages.append({"role": m.role, "content": m.content})
 
     # Inject booking state as a SYSTEM message immediately before the user's
-    # current message — this position gets maximum attention from the model
-    session_state = extract_booking_state(req.history)
+    # current message — this position gets maximum attention from the model.
+    # Include current user message in extraction so the state already reflects
+    # the answer the user just gave (e.g. name, phone) and skips to next step.
+    temp_history = list(req.history) + [HistoryMessage(role="user", content=req.message)]
+    session_state = extract_booking_state(temp_history)
     if session_state:
         messages.append({"role": "system", "content": session_state})
 
