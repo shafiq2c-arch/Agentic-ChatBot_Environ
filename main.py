@@ -624,8 +624,15 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None   # for future logging/tracking
 
 
+CONFIRM_WORDS = {"yes","sure","ok","okay","yeah","correct","go ahead","confirm",
+                 "confirmed","please","do it","book it","yep","yup","done"}
+
 def extract_booking_state(history: list) -> str:
-    """Scan conversation history and extract already-collected booking fields."""
+    """
+    Scan conversation history, extract collected booking fields, determine
+    the next required step, and return a structured state block to inject
+    as a high-priority system message immediately before the user's message.
+    """
     collected = {}
     msgs = [(m.role, m.content.strip()) for m in history]
 
@@ -634,34 +641,43 @@ def extract_booking_state(history: list) -> str:
         if role != "assistant":
             continue
         next_role, next_val = msgs[i + 1]
-        if next_role != "user" or not next_val or len(next_val) > 200:
+        if next_role != "user" or not next_val or len(next_val) > 300:
             continue
 
         lc = content.lower()
 
-        # Name (first) — accept 1-4 words, no @, no digits, not a description
-        if ("your name" in lc or "full name" in lc) and "last name" not in lc:
+        # Service
+        if ("which service" in lc or "what service" in lc or "what service do you need" in lc):
+            if len(next_val.split()) <= 8 and next_val.lower().strip() not in CONFIRM_WORDS:
+                collected["service"] = next_val
+
+        # Issue — accept ANY non-confirmation answer after asking for description
+        if ("describe the issue" in lc or "briefly describe" in lc or
+                "what issue" in lc or "what's the issue" in lc or "facing with" in lc):
+            if next_val.lower().strip() not in CONFIRM_WORDS:
+                collected["issue"] = next_val
+
+        # Name — 1-4 words, no digits, no @
+        if ("your name" in lc or "full name" in lc or "provide your name" in lc) and "last name" not in lc:
             words = next_val.split()
-            if ("@" not in next_val
-                    and 1 <= len(words) <= 4
-                    and not any(c.isdigit() for c in next_val)
-                    and all(len(w) >= 2 for w in words)):   # each word at least 2 chars
+            if ("@" not in next_val and 1 <= len(words) <= 4
+                    and not any(c.isdigit() for c in next_val)):
                 collected["name"] = next_val
 
-        # Last name — append to first name
+        # Last name — append
         if "last name" in lc:
-            if "@" not in next_val and not any(c.isdigit() for c in next_val) and len(next_val.split()) <= 2:
+            if "@" not in next_val and not any(c.isdigit() for c in next_val):
                 first = collected.get("name", "")
                 if first and next_val.lower() not in first.lower():
-                    collected["name"] = f"{first} {next_val}"
+                    collected["name"] = f"{first} {next_val}".strip()
                 elif not first:
                     collected["name"] = next_val
 
-        # Phone — require ≥7 digits AND digits make up ≥50% of the string
+        # Phone — ≥7 digits, digits ≥50% of string
         if ("phone" in lc or "mobile" in lc or "contact number" in lc) and "email" not in lc:
-            digits_in_val = re.sub(r"\D", "", next_val)
-            if (len(digits_in_val) >= 7
-                    and len(digits_in_val) / max(len(next_val), 1) >= 0.5
+            digits_only = re.sub(r"\D", "", next_val)
+            if (len(digits_only) >= 7
+                    and len(digits_only) / max(len(next_val), 1) >= 0.5
                     and len(next_val) <= 20):
                 collected["phone"] = next_val
 
@@ -669,54 +685,74 @@ def extract_booking_state(history: list) -> str:
         if "email" in lc and "@" in next_val:
             collected["email"] = next_val
 
-        # Service
-        if ("which service" in lc or "what service" in lc) and len(next_val.split()) <= 8:
-            collected["service"] = next_val
-
-        # Issue / description — accept any non-confirmation answer, even one word
-        CONFIRM_WORDS = {"yes","sure","ok","yeah","correct","go ahead","confirm","confirmed",
-                         "please","do it","book it","yep","yup","done","okay"}
-        if ("describe the issue" in lc or "what issue" in lc or "briefly describe" in lc):
-            if len(next_val.split()) >= 1 and next_val.lower().strip() not in CONFIRM_WORDS:
-                collected["issue"] = next_val
-
         # Date chosen
-        if ("which day" in lc or "what day" in lc or "what date" in lc) and len(next_val) <= 40:
-            collected["date_chosen"] = next_val
+        if ("which day" in lc or "what day" in lc or "what date" in lc or "when would" in lc):
+            if len(next_val) <= 50 and next_val.lower().strip() not in CONFIRM_WORDS:
+                collected["date_chosen"] = next_val
 
-        # Time slot clicked
-        if re.match(r"^\d{1,2}:\d{2}$", next_val):
-            collected["time_slot"] = next_val
+        # Time slot — HH:MM format
+        if re.match(r"^\d{1,2}:\d{2}$", next_val.strip()):
+            collected["time_slot"] = next_val.strip()
 
     if not collected:
         return ""
 
-    lines = ["ALREADY PROVIDED IN THIS CONVERSATION — USE THESE, DO NOT ASK AGAIN:"]
+    # ── Build structured state block ──────────────────
     label_map = {
-        "name": "👤 Name", "phone": "📱 Phone", "email": "📧 Email",
-        "service": "🔧 Service", "issue": "⚠️ Issue",
-        "date_chosen": "📅 Date", "time_slot": "⏰ Time slot"
+        "service":      "🔧 Service",
+        "issue":        "⚠️  Issue",
+        "date_chosen":  "📅 Date",
+        "time_slot":    "⏰ Time",
+        "name":         "👤 Name",
+        "phone":        "📱 Phone",
+        "email":        "📧 Email",
     }
-    for key, val in collected.items():
-        lines.append(f"  {label_map.get(key, key)}: {val}")
+    ORDERED = ["service", "issue", "date_chosen", "time_slot", "name", "phone", "email"]
 
+    lines = ["━━━ BOOKING STATE (injected by system — highest priority) ━━━"]
+    for key in ORDERED:
+        if key in collected:
+            lines.append(f"  ✅ {label_map[key]}: {collected[key]}")
+
+    # Determine exactly what to do next
+    if "service" not in collected:
+        next_step = 'Ask: "What service do you need?"'
+    elif "issue" not in collected:
+        next_step = ('Ask: "Could you briefly describe the issue?" — '
+                     'then accept the VERY NEXT reply as-is, even one word. Move on immediately.')
+    elif "date_chosen" not in collected and "time_slot" not in collected:
+        next_step = 'Ask which day works and call check_availability. Do NOT ask for issue again.'
+    elif "time_slot" not in collected:
+        next_step = 'Wait for user to pick a time slot from the buttons.'
+    elif "name" not in collected:
+        next_step = 'Ask: "Could you provide your full name?"'
+    elif "phone" not in collected:
+        next_step = 'Ask: "Could you provide your phone number?"'
+    elif "email" not in collected:
+        next_step = 'Ask: "Could you provide your email address?"'
+    else:
+        next_step = 'Show full confirmation summary and ask "Shall I confirm this booking?"'
+
+    lines.append(f"\n  ⏭  NEXT STEP: {next_step}")
+    lines.append("  🚫 DO NOT re-ask for any ✅ field above — they are final.")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     return "\n".join(lines)
 
 
 def build_messages(req: ChatRequest) -> tuple[list, str]:
-    today   = datetime.date.today().strftime("%A, %d %B %Y")
-    system  = SYSTEM_PROMPT_TEMPLATE.format(today=today)
-
-    # Inject already-collected booking fields so AI never re-asks them
-    session_state = extract_booking_state(req.history)
-    if session_state:
-        system = system + "\n\n" + session_state
-
+    today  = datetime.date.today().strftime("%A, %d %B %Y")
+    system = SYSTEM_PROMPT_TEMPLATE.format(today=today)
     context = retrieve_context(req.message)
 
     messages = [{"role": "system", "content": system}]
     for m in req.history[-20:]:
         messages.append({"role": m.role, "content": m.content})
+
+    # Inject booking state as a SYSTEM message immediately before the user's
+    # current message — this position gets maximum attention from the model
+    session_state = extract_booking_state(req.history)
+    if session_state:
+        messages.append({"role": "system", "content": session_state})
 
     user_text = (
         f"Knowledge base context:\n{context}\n\n---\n\nUser: {req.message}"
