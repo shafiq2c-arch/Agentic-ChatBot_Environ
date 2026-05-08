@@ -44,7 +44,7 @@ STYLE: Concise. 2-3 sentences max. Bullet points for lists. No long paragraphs.
 
 ━━━ BOOKING FLOW (follow exactly, one step at a time) ━━━
 STEP 1 — Service: Ask "What service do you need?" (damp survey, mould removal, rot treatment, repointing, roofing, drainage, pest control, etc.)
-STEP 2 — Issue: Ask "Could you briefly describe the issue?" → Accept the VERY NEXT reply as the issue, NO MATTER WHAT IT IS (one word like "mould" is fine). Move on immediately. NEVER ask twice.
+STEP 2 — Issue: Ask "Could you briefly describe the issue?" → Accept the VERY NEXT reply as-is, NO MATTER WHAT IT IS. One word like "mould" is fine. If they say "no", "skip", "not sure", "I'll tell you later", "rather not say" or anything negative/evasive — say "No problem, we can discuss it on the day!" and set the issue as "Will discuss on site". NEVER ask twice.
 STEP 3 — Date: Say "Which day works for you?" then call check_availability.
 STEP 4 — Time: Say ONLY "We have availability on [formatted_date]! Please pick a time 👇" — time buttons appear automatically, do NOT list times as text.
 STEP 5 — Name: Ask "Could you provide your full name?" → Accept anything. Move on.
@@ -610,11 +610,20 @@ def extract_booking_state(history: list) -> str:
             if len(next_val.split()) <= 8 and next_val.lower().strip() not in CONFIRM_WORDS:
                 collected["service"] = next_val
 
-        # Issue — accept ANY non-confirmation answer after asking for description
+        # Issue — accept ANY answer after asking for description.
+        # If user skips / refuses, store a placeholder so we never ask again.
+        SKIP_WORDS = {"no","nope","skip","pass","later","idk","don't know","not sure",
+                      "n/a","na","nothing","private","rather not","prefer not","no thanks",
+                      "i'll tell you","tell you later","tell you when","explain later"}
         if ("describe the issue" in lc or "briefly describe" in lc or
                 "what issue" in lc or "what's the issue" in lc or "facing with" in lc):
             if next_val.lower().strip() not in CONFIRM_WORDS:
-                collected["issue"] = next_val
+                nv_lower = next_val.lower().strip()
+                # Negative / skip response → use placeholder
+                if any(nv_lower == s or nv_lower.startswith(s) for s in SKIP_WORDS):
+                    collected["issue"] = "Will discuss on site"
+                else:
+                    collected["issue"] = next_val
 
         # Name — 1-4 words, no digits, no @
         if ("your name" in lc or "full name" in lc or "provide your name" in lc) and "last name" not in lc:
