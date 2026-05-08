@@ -586,6 +586,30 @@ class ChatRequest(BaseModel):
 CONFIRM_WORDS = {"yes","sure","ok","okay","yeah","correct","go ahead","confirm",
                  "confirmed","please","do it","book it","yep","yup","done"}
 
+def parse_time_to_hhmm(text: str):
+    """
+    Convert a time expression to HH:MM 24-hour string, or return None.
+    Handles: "14:00", "2pm", "2 pm", "2:30pm", "9am", "9 am", "9:00am"
+    """
+    t = text.strip().lower()
+    # Already exact HH:MM
+    if re.match(r"^\d{1,2}:\d{2}$", t):
+        h, m = t.split(":")
+        return f"{int(h):02d}:{m}"
+    # 12-hour with am/pm, optional minutes: "2pm", "2 pm", "2:30pm", "14pm" etc.
+    m = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", t)
+    if m:
+        h    = int(m.group(1))
+        mins = m.group(2) or "00"
+        ampm = m.group(3)
+        if ampm == "pm" and h != 12:
+            h += 12
+        elif ampm == "am" and h == 12:
+            h = 0
+        if 0 <= h <= 23:
+            return f"{h:02d}:{mins}"
+    return None
+
 def extract_booking_state(history: list) -> str:
     """
     Scan conversation history, extract collected booking fields, determine
@@ -658,9 +682,13 @@ def extract_booking_state(history: list) -> str:
             if len(next_val) <= 50 and next_val.lower().strip() not in CONFIRM_WORDS:
                 collected["date_chosen"] = next_val
 
-        # Time slot — HH:MM format
-        if re.match(r"^\d{1,2}:\d{2}$", next_val.strip()):
-            collected["time_slot"] = next_val.strip()
+        # Time slot — exact HH:MM or natural language (2pm, 9am, etc.)
+        # Only capture when bot's message was about picking a time
+        if ("pick a time" in lc or "please pick" in lc or "which time" in lc
+                or re.match(r"^\d{1,2}:\d{2}$", next_val.strip())):
+            parsed = parse_time_to_hhmm(next_val)
+            if parsed:
+                collected["time_slot"] = parsed
 
     # ── FALLBACK: extract service from any user message ──
     # Handles the case where user mentions service upfront (e.g. "I want to book a damp survey")
@@ -690,13 +718,21 @@ def extract_booking_state(history: list) -> str:
             if "service" in collected:
                 break
 
-    # ── FALLBACK: extract time slot from any user message ──
-    # Handles cases where "11:00" was sent as a button click after a bot message
-    # that didn't explicitly ask for time in a detectable way
+    # ── FALLBACK: extract time slot from user message after a time-picker prompt ──
+    # Handles "11:00" button clicks AND natural language like "2pm", "9 am"
     if "time_slot" not in collected:
-        for msg_role, msg_content in msgs:
-            if msg_role == "user" and re.match(r"^\d{1,2}:\d{2}$", msg_content.strip()):
-                collected["time_slot"] = msg_content.strip()
+        for i in range(len(msgs) - 1):
+            role, content = msgs[i]
+            if role != "assistant":
+                continue
+            lc2 = content.lower()
+            if "pick a time" in lc2 or "please pick" in lc2 or "availability" in lc2:
+                next_role2, next_val2 = msgs[i + 1]
+                if next_role2 == "user":
+                    parsed = parse_time_to_hhmm(next_val2)
+                    if parsed:
+                        collected["time_slot"] = parsed
+                        break
 
     # ── FALLBACK: extract date from any user message ──
     # Handles date button clicks like "Monday, 11 May 2026"
