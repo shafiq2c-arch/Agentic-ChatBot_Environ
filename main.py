@@ -47,11 +47,20 @@ PRIMARY GOAL: Help users understand their property issue, then guide them toward
 
 BOOKING APPROACH:
 - After 1-2 questions, naturally suggest: "This sounds like something worth inspecting in person — I can check our availability for a free site visit if you'd like?"
-- When they agree: ask which day suits them, then call check_availability
+- When they agree: check today first, then tomorrow, then ask if neither works
+- If user says "as soon as possible", "ASAP", "earliest", or "any day" — automatically call check_availability for today, then tomorrow (skip Sunday), pick the first date that has slots and present them
+- If user gives a relative date like "day after tomorrow", "in 3 days", "next Monday" — calculate the exact date yourself using today's date, then call check_availability with that YYYY-MM-DD date
 - Present available slots clearly, ask them to pick one
+- IMPORTANT: Only accept a time the user picks from the slots you showed them. If they pick a time not in the list, politely say it's not available and ask them to pick from the shown slots
 - Then collect: full name, phone number, email address (ask naturally, not all at once)
 - Once you have all three, call book_appointment
 - Confirm warmly: "✅ You're booked! See you on [date] at [time], [name]."
+
+DATE RULES:
+- Never book in the past — if user asks for yesterday or a past date, politely decline and suggest tomorrow
+- No Sundays — if calculated date is Sunday, move to Monday
+- Convert all relative dates to YYYY-MM-DD before calling any tool
+- Today is {today} — use this to calculate any relative dates
 
 TOOLS AVAILABLE:
 - check_availability(date): checks free 1-hour slots between 9 AM–6 PM Monday–Saturday
@@ -61,7 +70,6 @@ SERVICES: Damp (rising/penetrating/lateral/condensation), mould removal & remedi
 
 COMPANY: Environ Property Services — family-run, London-based, 15+ years experience, 65+ specialists, PCA-accredited, TrustMark registered, SPAB-affiliated director (Terry Clark).
 
-Today: {today}
 Working hours: Monday–Saturday, 9 AM–6 PM (London time). No Sundays."""
 
 # ── OpenAI tools ───────────────────────────────────
@@ -238,11 +246,14 @@ def _send_whatsapp(name: str, phone: str, email: str, dt: datetime.datetime):
 
 
 def execute_tool(name: str, args: dict) -> dict:
-    if name == "check_availability":
-        return check_calendar_availability(args["date"])
-    if name == "book_appointment":
-        return create_calendar_booking(args)
-    return {"error": "Unknown tool"}
+    try:
+        if name == "check_availability":
+            return check_calendar_availability(args["date"])
+        if name == "book_appointment":
+            return create_calendar_booking(args)
+        return {"error": "Unknown tool"}
+    except Exception as e:
+        return {"error": str(e), "available": False, "slots": []}
 
 
 # ── RAG ────────────────────────────────────────────
