@@ -237,6 +237,18 @@ def create_calendar_booking(args: dict) -> dict:
         end   = start + datetime.timedelta(hours=SLOT_DURATION_H)
 
         service = get_calendar_service()
+
+        # Guard against double-booking: check the slot is still free right now
+        busy_check = service.freebusy().query(body={
+            "timeMin": start.isoformat(),
+            "timeMax": end.isoformat(),
+            "items":   [{"id": CALENDAR_ID}]
+        }).execute()
+        busy_now = busy_check.get("calendars", {}).get(CALENDAR_ID, {}).get("busy", [])
+        if busy_now:
+            return {"success": False, "error": "slot_taken",
+                    "message": f"The {args['time']} slot on {args['date']} was just taken. Please check availability again and pick another slot."}
+
         event = service.events().insert(
             calendarId=CALENDAR_ID,
             body={
@@ -261,13 +273,20 @@ def create_calendar_booking(args: dict) -> dict:
             }
         ).execute()
 
-        _send_whatsapp(args["name"], args["phone"], args["email"], start, args.get("service", "Property Inspection"), args.get("issue", "N/A"))
+        # WhatsApp is best-effort — never block the booking if it fails
+        wa_note = ""
+        try:
+            _send_whatsapp(args["name"], args["phone"], args["email"], start, args.get("service", "Property Inspection"), args.get("issue", "N/A"))
+        except Exception as wa_err:
+            print(f"[WHATSAPP ERROR] {wa_err}", flush=True)
+            wa_note = f" (WhatsApp notification failed: {wa_err})"
 
         return {
             "success": True,
             "formatted_date": start.strftime("%A, %d %B %Y"),
             "formatted_time": start.strftime("%I:%M %p"),
-            "name": args["name"]
+            "name": args["name"],
+            "note": wa_note.strip()
         }
     except Exception as e:
         print(f"[BOOKING ERROR] {e}", flush=True)
