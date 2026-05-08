@@ -52,10 +52,23 @@ BOOKING APPROACH:
 - If user gives a relative date like "day after tomorrow", "in 3 days", "next Monday" — calculate the exact date yourself using today's date, then call check_availability with that YYYY-MM-DD date
 - Present available slots clearly, ask them to pick one
 - IMPORTANT: Only accept a time the user picks from the slots you showed them. If they pick a time not in the list, politely say it's not available and ask them to pick from the shown slots
-- Then collect: full name, phone number, email address (ask naturally, not all at once)
-- Validate before booking: email MUST contain @ and a dot (e.g. name@gmail.com). Phone MUST be a real number with at least 7 digits. If either looks fake or invalid, ask again before calling book_appointment
-- Once you have all three valid details, call book_appointment
-- Confirm warmly: "✅ You're booked! See you on [date] at [time], [name]."
+
+COLLECTING DETAILS:
+- Ask for full name, phone number, email one at a time naturally
+- NAME: Must be a real person's name (at least 2 words, e.g. "John Smith"). If they say "my name is name", "test", "user", "abc", or any single generic word, say: "Could you share your actual full name so I can make the booking?"
+- PHONE: Must be a valid UK, US, or European number. Valid examples: 07911 123456 (UK), +44 7911 123456 (UK), +1 212 555 0100 (US), +33 6 12 34 56 78 (France). If it's clearly fake (e.g. 1111111111, 0000000000, 12345) say: "That doesn't look like a valid UK, US, or European number — could you double-check it?"
+- EMAIL: Must contain @ and a domain with a dot (e.g. john@gmail.com). If invalid, say: "That doesn't look like a valid email — could you check it? (e.g. yourname@gmail.com)"
+
+CONFIRMATION STEP (before booking):
+- Once you have all three valid details, ALWAYS show a summary first:
+  "Here's what I have:
+  👤 Name: [name]
+  📱 Phone: [phone]
+  📧 Email: [email]
+  📅 Date: [day, date] at [time]
+  Shall I confirm this booking?"
+- Only call book_appointment AFTER the user says yes/confirm/correct/looks good
+- Confirm warmly after booking: "✅ You're booked! See you on [date] at [time], [name]."
 
 DATE RULES:
 - Never book in the past — if user asks for yesterday or a past date, politely decline and suggest tomorrow
@@ -192,16 +205,38 @@ def check_calendar_availability(date_str: str) -> dict:
 
 def create_calendar_booking(args: dict) -> dict:
     import re
-    # Validate email
-    email = args.get("email", "")
-    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
-        return {"success": False, "error": "invalid_email", "message": "That doesn't look like a valid email address. Please ask the customer to provide a valid email (e.g. name@example.com)."}
 
-    # Validate phone — must have at least 7 digits
-    phone = args.get("phone", "")
-    digits = re.sub(r"\D", "", phone)
-    if len(digits) < 7:
-        return {"success": False, "error": "invalid_phone", "message": "That doesn't look like a valid phone number. Please ask the customer to provide a valid phone number."}
+    # ── Email validation ──────────────────────────────
+    email = args.get("email", "").strip()
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]{2,}$", email):
+        return {"success": False, "error": "invalid_email",
+                "message": "That doesn't look like a valid email. Please ask the customer for a valid email (e.g. name@gmail.com)."}
+
+    # ── Phone validation: UK / US / European ─────────
+    phone = args.get("phone", "").strip()
+    cleaned = re.sub(r"[\s\-\.\(\)]", "", phone)
+
+    uk      = r"^(\+44|0044)?0?[1-9]\d{8,9}$"           # UK: 07xxx or +447xxx
+    us      = r"^(\+1|1)?[2-9]\d{2}[2-9]\d{6}$"         # US: 10-digit NANP
+    eu      = r"^\+[3-9]\d{6,13}$"                       # European: +country_code + 6-13 digits
+    repeated = r"^(.)\1{6,}$"                             # reject 111111111, 000000000
+
+    digits_only = re.sub(r"\D", "", cleaned)
+    is_repeated = bool(re.match(repeated, digits_only))
+    is_sequential = digits_only in ["1234567890","0123456789","12345678901"]
+    valid_format = bool(re.match(uk, cleaned) or re.match(us, cleaned) or re.match(eu, cleaned))
+
+    if not valid_format or is_repeated or is_sequential:
+        return {"success": False, "error": "invalid_phone",
+                "message": "That doesn't look like a valid UK, US, or European number. Please ask for a real number (e.g. 07911 123456 or +1 212 555 0100)."}
+
+    # ── Name validation ───────────────────────────────
+    name = args.get("name", "").strip()
+    fake_names = {"name", "test", "user", "abc", "xyz", "none", "na", "n/a", "unknown"}
+    name_words = name.lower().split()
+    if len(name_words) < 2 or name_words[0] in fake_names or name_words[-1] in fake_names:
+        return {"success": False, "error": "invalid_name",
+                "message": "That doesn't look like a real full name. Please ask the customer for their actual first and last name."}
 
     try:
         dt    = datetime.datetime.strptime(f"{args['date']} {args['time']}", "%Y-%m-%d %H:%M")
