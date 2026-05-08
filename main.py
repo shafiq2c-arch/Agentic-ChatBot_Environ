@@ -600,6 +600,150 @@ class ChatRequest(BaseModel):
 CONFIRM_WORDS = {"yes","sure","ok","okay","yeah","correct","go ahead","confirm",
                  "confirmed","please","do it","book it","yep","yup","done"}
 
+# ── Guardrails ─────────────────────────────────────
+
+INPUT_MAX_CHARS = 600   # hard cap on user message length
+
+# Days that cannot exist in certain months
+_MONTH_MAX_DAYS = {
+    "feb": 29, "february": 29,
+    "apr": 30, "april": 30,
+    "jun": 30, "june": 30,
+    "sep": 30, "september": 30,
+    "nov": 30, "november": 30,
+}
+
+def validate_input(message: str) -> dict:
+    """
+    Run all input guardrails. Returns {"ok": True} or {"ok": False, "reply": "..."}
+    """
+    s = message.strip()
+
+    # 1. Empty
+    if not s:
+        return {"ok": False, "reply": "Please type a message and I'll be happy to help! 😊"}
+
+    # 2. Max length
+    if len(s) > INPUT_MAX_CHARS:
+        return {"ok": False, "reply": (
+            f"Your message is too long ({len(s)} characters — max {INPUT_MAX_CHARS}). "
+            "Could you shorten it, or split it across a couple of messages?"
+        )}
+
+    # 3. Non-English script (Arabic, Chinese, Cyrillic, Hindi, etc.)
+    #    Count chars above Unicode 591 that are letters — high ratio = non-Latin script
+    non_latin = sum(1 for c in s if c.isalpha() and ord(c) > 591)
+    if len(s) > 8 and non_latin / max(len(s), 1) > 0.25:
+        return {"ok": False, "reply": (
+            "I can only assist in English. Please write your message in English "
+            "and I'll be glad to help! 😊"
+        )}
+
+    # 4. Spam / gibberish — same character repeated 10+ times
+    if re.search(r'(.)\1{9,}', s):
+        return {"ok": False, "reply": (
+            "That doesn't look like a valid message. "
+            "Please describe your property issue and I'll help you out!"
+        )}
+
+    # 5. Invalid date: day number that cannot exist
+    s_lower = s.lower()
+    # Day > 31 for any month
+    m = re.search(
+        r'\b(3[2-9]|[4-9]\d|\d{3,})\s*(?:st|nd|rd|th)?\s+'
+        r'(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|'
+        r'jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b',
+        s_lower
+    )
+    if m:
+        return {"ok": False, "reply": (
+            f"Hmm, that date doesn't seem right — there's no **{m.group(0)}**. "
+            "Could you double-check and let me know the correct date?"
+        )}
+    # Day 0
+    if re.search(
+        r'\b0+\s*(?:st|nd|rd|th)?\s+'
+        r'(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\b', s_lower
+    ):
+        return {"ok": False, "reply": (
+            "Day 0 doesn't exist! Could you double-check the date you meant?"
+        )}
+    # Month-specific overflows (e.g. Feb 30, April 31)
+    m2 = re.search(
+        r'\b(3[01]|29|30)\s*(?:st|nd|rd|th)?\s+'
+        r'(feb(?:ruary)?|apr(?:il)?|jun(?:e)?|sep(?:tember)?|nov(?:ember)?)\b',
+        s_lower
+    )
+    if m2:
+        day, mon = int(m2.group(1)), m2.group(2)[:3]
+        if day > _MONTH_MAX_DAYS.get(mon, 31):
+            return {"ok": False, "reply": (
+                f"That date isn't valid — **{m2.group(0)}** doesn't exist. "
+                "Please pick a real date and I'll check availability for you!"
+            )}
+    # Month name given as number > 12
+    m3 = re.search(r'\b(1[3-9]|[2-9]\d)\s*/\s*\d{4}\b', s_lower)
+    if m3:
+        return {"ok": False, "reply": (
+            f"Month {m3.group(1)} doesn't exist — there are only 12 months. "
+            "Could you double-check the date?"
+        )}
+
+    # 6. Prompt injection attempts
+    _INJECT = [
+        r'ignore\s+(your|all|previous)\s+(instructions?|rules?|prompt)',
+        r'you\s+are\s+now\b',
+        r'forget\s+(everything|all|your)',
+        r'(new|override)\s+instructions?\s*:',
+        r'pretend\s+(you\s+are|to\s+be)',
+        r'\bjailbreak\b',
+        r'act\s+as\s+(?:if\s+)?(?:you\s+(?:are|were)|a\s+)',
+        r'disregard\s+(all|your|previous)',
+    ]
+    for pat in _INJECT:
+        if re.search(pat, s_lower):
+            return {"ok": False, "reply": (
+                "I'm here to help with property and home-related questions only! "
+                "What can I help you with today? 😊"
+            )}
+
+    return {"ok": True}
+
+
+def validate_output(text: str) -> str:
+    """
+    Run output guardrails on the fully assembled bot response.
+    Returns the original text, a sanitised version, or a safe fallback.
+    """
+    if not text:
+        return text
+
+    # 1. Non-English output — GPT-4o should never do this, but safety net
+    non_latin = sum(1 for c in text if c.isalpha() and ord(c) > 591)
+    if len(text) > 30 and non_latin / max(len(text), 1) > 0.25:
+        return ("I'm sorry, something went wrong with my response. "
+                "Could you rephrase your question and I'll try again?")
+
+    # 2. Internal Python error strings leaking into the response
+    _LEAK = ['traceback (most recent', 'file "/', 'line ', 'syntaxerror',
+             'valueerror', 'keyerror', 'attributeerror']
+    tl = text.lower()
+    if any(p in tl for p in _LEAK[:2]):   # only the most obvious leaks
+        return ("I ran into a small technical issue. "
+                "Please try again or contact us directly — we're happy to help!")
+
+    # 3. Excessive length safety valve — trim gracefully at sentence boundary
+    MAX_OUTPUT_CHARS = 1200
+    if len(text) > MAX_OUTPUT_CHARS:
+        cut = text[:MAX_OUTPUT_CHARS]
+        last_stop = max(cut.rfind('. '), cut.rfind('.\n'), cut.rfind('! '), cut.rfind('? '))
+        if last_stop > MAX_OUTPUT_CHARS * 0.6:
+            text = cut[:last_stop + 1] + "\n\n*…Feel free to ask if you'd like more detail!*"
+        else:
+            text = cut.rstrip() + "…"
+
+    return text
+
 def parse_time_to_hhmm(text: str):
     """
     Convert a time expression to HH:MM 24-hour string, or return None.
@@ -914,6 +1058,18 @@ def build_messages(req: ChatRequest) -> tuple[list, str]:
 # ── Chat endpoint ──────────────────────────────────
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
+    # ── Input guardrail ────────────────────────────
+    guard = validate_input(req.message)
+    if not guard["ok"]:
+        reply = guard["reply"]
+        def _blocked():
+            words = reply.split(" ")
+            for i, w in enumerate(words):
+                yield f"data: {json.dumps({'token': w + (' ' if i < len(words)-1 else '')})}\n\n"
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(_blocked(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache"})
+
     messages, model = build_messages(req)
 
     def generate():
@@ -981,7 +1137,7 @@ async def chat(req: ChatRequest):
                 }
             ] + tool_results
 
-            # Step 3: stream text response first
+            # Step 3: buffer streaming response then apply output guardrail
             stream = openai_client.chat.completions.create(
                 model=model,
                 messages=follow_up,
@@ -989,18 +1145,23 @@ async def chat(req: ChatRequest):
                 temperature=0.4,
                 stream=True,
             )
+            raw_text = ""
             for chunk in stream:
                 delta = chunk.choices[0].delta.content
                 if delta:
-                    yield f"data: {json.dumps({'token': delta})}\n\n"
+                    raw_text += delta
+            safe_text = validate_output(raw_text)
+            words = safe_text.split(" ")
+            for i, w in enumerate(words):
+                yield f"data: {json.dumps({'token': w + (' ' if i < len(words)-1 else '')})}\n\n"
 
             # Step 4: after text, emit UI events so buttons appear below the bubble
             for evt in ui_events:
                 yield f"data: {json.dumps(evt)}\n\n"
 
         else:
-            # No tool call — stream the response we already have word-by-word
-            content = choice.message.content or ""
+            # No tool call — apply output guardrail then stream word-by-word
+            content = validate_output(choice.message.content or "")
             words = content.split(" ")
             for i, word in enumerate(words):
                 token = word + (" " if i < len(words) - 1 else "")
