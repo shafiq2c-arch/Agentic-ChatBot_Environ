@@ -1,7 +1,7 @@
 'use strict';
 
 // ── Session constants ──────────────────────────────
-const MAX_TURNS = 12;   // show WhatsApp card after this many user turns (if no booking)
+const MAX_TURNS = 15;   // show WhatsApp card after this many user turns (if no booking)
 const WA_NUMBER = '447341650417';
 const WA_TEXT   = encodeURIComponent('Hi! I need help with my property enquiry.');
 
