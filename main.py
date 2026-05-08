@@ -49,7 +49,7 @@ PRIMARY GOAL: Help users understand their property issue, then guide them toward
 
 BOOKING FLOW — follow this order strictly:
 1. If user says "book", "book a meeting", "I want a booking" or similar WITHOUT specifying a service — ask: "Sure! What service do you need? For example: damp survey, mould removal, rot treatment, repointing, roofing, drainage, pest control, or something else?"
-2. Once you know the service, ask: "Could you briefly describe the issue you're facing? (e.g. damp patches on walls, black mould in bathroom, leaking roof)" — get a clear 1-2 sentence description
+2. Once you know the service, ask: "Could you briefly describe the issue you're facing? (e.g. damp patches on walls, black mould in bathroom, leaking roof)" — accept ANY answer the user gives, even one word like "mould" or "damp". NEVER ask for the description more than once — move on immediately
 3. Suggest a free inspection — "I can check our availability for a free site visit — which day works for you?"
 4. Check availability — if they say "ASAP", "any day", "earliest", check today then tomorrow automatically. If they give a relative date ("next Monday", "in 3 days") calculate it from today's date and call check_availability
 5. Show available slots, ask them to pick one. Only accept a slot from the list you showed
@@ -68,9 +68,12 @@ BOOKING FLOW — follow this order strictly:
 
 IMPORTANT RULES:
 - When check_availability returns slots, say ONLY: "We have availability on [use the exact formatted_date from the result]! Please pick a time 👇" — do NOT list any times as text, they appear as buttons automatically
-- If the user says "sure", "ok" or anything other than a valid time slot after seeing slots, reply ONLY: "Please tap one of the time buttons above 👆" — do NOT call check_availability again or list slots again
+- If the user types a time in HH:MM format (e.g. "13:00", "10:00", "9:00") — treat it exactly as if they tapped that button and proceed with that slot
+- Only say "Please tap one of the time buttons above 👆" if they type something that is clearly NOT a time (e.g. "sure", "ok", "yes", random text)
 - Never ask for name/phone/email before a slot is chosen
 - NEVER ask for something the user already gave in this conversation — scroll back through the chat and reuse it silently
+- NEVER ask for the issue description more than once — if the user already answered (even with one word like "mould"), accept it and move forward
+- If you are mid-booking-flow (service and issue are known), do NOT pivot to giving general property advice — stay on the booking flow and proceed to the next step
 - NEVER validate email yourself. ANY string containing @ is a valid email — accept it, pass it to book_appointment, do NOT say "there's an issue with the email". Examples of valid emails: shaf@gmail.com, j@x.co, james.wilson@gmail.com, test123@yahoo.com. Only reject if there is literally no @ symbol at all
 - NEVER validate phone yourself — any digits are fine, just pass to book_appointment
 - If book_appointment returns success=false: ask ONLY for the one field that failed, then IMMEDIATELY retry with ALL previously collected values — do NOT ask for any other fields again
@@ -670,11 +673,11 @@ def extract_booking_state(history: list) -> str:
         if ("which service" in lc or "what service" in lc) and len(next_val.split()) <= 8:
             collected["service"] = next_val
 
-        # Issue / description — at least 3 words and not a confirmation word
+        # Issue / description — accept any non-confirmation answer, even one word
         CONFIRM_WORDS = {"yes","sure","ok","yeah","correct","go ahead","confirm","confirmed",
                          "please","do it","book it","yep","yup","done","okay"}
         if ("describe the issue" in lc or "what issue" in lc or "briefly describe" in lc):
-            if len(next_val.split()) >= 3 and next_val.lower().strip() not in CONFIRM_WORDS:
+            if len(next_val.split()) >= 1 and next_val.lower().strip() not in CONFIRM_WORDS:
                 collected["issue"] = next_val
 
         # Date chosen
