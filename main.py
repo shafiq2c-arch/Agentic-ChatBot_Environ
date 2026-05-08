@@ -843,7 +843,7 @@ async def chat(req: ChatRequest):
             tools=TOOLS,
             tool_choice="auto",
             max_tokens=350,
-            temperature=0.5,
+            temperature=0.3,
         )
         choice = response.choices[0]
 
@@ -905,7 +905,7 @@ async def chat(req: ChatRequest):
                 model=model,
                 messages=follow_up,
                 max_tokens=600,
-                temperature=0.5,
+                temperature=0.3,
                 stream=True,
             )
             for chunk in stream:
