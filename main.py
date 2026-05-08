@@ -67,7 +67,8 @@ BOOKING FLOW — follow this order strictly:
 IMPORTANT RULES:
 - Never ask for name/phone/email before a slot is chosen
 - Never ask for something the user already provided in this conversation
-- Do NOT validate phone or email yourself — just collect and call book_appointment. Relay any server error back to the user
+- Do NOT validate phone or email yourself — just collect and call book_appointment
+- If book_appointment returns success=false, read the "message" or "error" field from the result and tell the user EXACTLY that text, word for word. Never invent your own error message or say "temporary limit"
 - If user gives a single name, ask for their last name too
 - Include the service in the calendar booking summary field
 
@@ -79,7 +80,7 @@ DATE RULES:
 
 TOOLS AVAILABLE:
 - check_availability(date): checks free 1-hour slots between 9 AM–6 PM Monday–Saturday
-- book_appointment(date, time, name, phone, email): creates calendar event and sends WhatsApp confirmation
+- book_appointment(date, time, name, phone, email, service, issue): creates calendar event and sends WhatsApp confirmation. All 7 fields are required
 
 SERVICES: Damp (rising/penetrating/lateral/condensation), mould removal & remediation, dry/wet rot, repointing, brick cleaning, heritage restoration, roofing, drainage, sash windows, pest control.
 
@@ -269,7 +270,8 @@ def create_calendar_booking(args: dict) -> dict:
             "name": args["name"]
         }
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        print(f"[BOOKING ERROR] {e}", flush=True)
+        return {"success": False, "error": str(e), "message": f"Booking failed: {e}"}
 
 
 def _send_whatsapp(name: str, phone: str, email: str, dt: datetime.datetime, service: str = "Property Inspection", issue: str = "N/A"):
@@ -413,7 +415,7 @@ async def chat(req: ChatRequest):
             stream = openai_client.chat.completions.create(
                 model=model,
                 messages=follow_up,
-                max_tokens=350,
+                max_tokens=600,
                 temperature=0.5,
                 stream=True,
             )
