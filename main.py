@@ -56,7 +56,7 @@ BOOKING APPROACH:
 COLLECTING DETAILS:
 - Ask for full name, phone number, email one at a time naturally
 - NAME: Must be a real person's name (at least 2 words, e.g. "John Smith"). If they say "my name is name", "test", "user", "abc", or any single generic word, say: "Could you share your actual full name so I can make the booking?"
-- PHONE: Must be a valid UK, US, or European number. Valid examples: 07911 123456 (UK), +44 7911 123456 (UK), +1 212 555 0100 (US), +33 6 12 34 56 78 (France). If it's clearly fake (e.g. 1111111111, 0000000000, 12345) say: "That doesn't look like a valid UK, US, or European number — could you double-check it?"
+- PHONE: Accept any phone number from any country as long as it looks real (6-15 digits). Only flag it if it's obviously fake like 111111111, 000000000, 22222222222, or 12345. Say: "That doesn't look like a real number — could you double-check it?"
 - EMAIL: Must contain @ and a domain with a dot (e.g. john@gmail.com). If invalid, say: "That doesn't look like a valid email — could you check it? (e.g. yourname@gmail.com)"
 
 CONFIRMATION STEP (before booking):
@@ -212,23 +212,26 @@ def create_calendar_booking(args: dict) -> dict:
         return {"success": False, "error": "invalid_email",
                 "message": "That doesn't look like a valid email. Please ask the customer for a valid email (e.g. name@gmail.com)."}
 
-    # ── Phone validation: UK / US / European ─────────
+    # ── Phone validation: lenient — just reject obvious fakes ─────────
     phone = args.get("phone", "").strip()
-    cleaned = re.sub(r"[\s\-\.\(\)]", "", phone)
+    digits_only = re.sub(r"\D", "", phone)
 
-    uk      = r"^(\+44|0044)?0?[1-9]\d{8,9}$"           # UK: 07xxx or +447xxx
-    us      = r"^(\+1|1)?[2-9]\d{2}[2-9]\d{6}$"         # US: 10-digit NANP
-    eu      = r"^\+[3-9]\d{6,13}$"                       # European: +country_code + 6-13 digits
-    repeated = r"^(.)\1{6,}$"                             # reject 111111111, 000000000
-
-    digits_only = re.sub(r"\D", "", cleaned)
-    is_repeated = bool(re.match(repeated, digits_only))
-    is_sequential = digits_only in ["1234567890","0123456789","12345678901"]
-    valid_format = bool(re.match(uk, cleaned) or re.match(us, cleaned) or re.match(eu, cleaned))
-
-    if not valid_format or is_repeated or is_sequential:
+    # Must have between 6 and 15 digits
+    if len(digits_only) < 6 or len(digits_only) > 15:
         return {"success": False, "error": "invalid_phone",
-                "message": "That doesn't look like a valid UK, US, or European number. Please ask for a real number (e.g. 07911 123456 or +1 212 555 0100)."}
+                "message": "That doesn't look like a valid phone number. Please provide a number between 6 and 15 digits."}
+
+    # Reject all same digits: 111111, 000000, 9999999999 etc.
+    if len(set(digits_only)) == 1:
+        return {"success": False, "error": "invalid_phone",
+                "message": "That doesn't look like a real phone number. Could you double-check it?"}
+
+    # Reject obvious sequences: 123456789, 987654321
+    sequential_asc  = "0123456789"
+    sequential_desc = "9876543210"
+    if digits_only in sequential_asc or digits_only in sequential_desc:
+        return {"success": False, "error": "invalid_phone",
+                "message": "That doesn't look like a real phone number. Could you double-check it?"}
 
     # ── Name validation ───────────────────────────────
     name = args.get("name", "").strip()
