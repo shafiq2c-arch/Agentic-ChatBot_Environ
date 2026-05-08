@@ -46,26 +46,29 @@ RESPONSE STYLE:
 PRIMARY GOAL: Help users understand their property issue, then guide them toward booking a FREE site inspection.
 
 BOOKING FLOW — follow this order strictly:
-1. Ask about their property issue (1-2 questions max)
-2. Suggest a free inspection — "This sounds like something we should inspect in person. Can I check our availability for you?"
-3. Check availability — if they say "ASAP", "any day", "earliest", check today then tomorrow automatically. If they give a relative date ("next Monday", "in 3 days") calculate it from today's date and call check_availability
-4. Show available slots, ask them to pick one. Only accept a slot from the list you showed
-5. Collect name → phone → email one at a time (do NOT ask for name before checking slots)
-6. Once you have name, phone and email — show a confirmation summary:
+1. If user says "book", "book a meeting", "I want a booking" or similar WITHOUT specifying a service — ask: "Sure! What service do you need? For example: damp survey, mould removal, rot treatment, repointing, roofing, drainage, pest control, or something else?"
+2. Once you know the service, ask 1 quick question about their issue to understand it better
+3. Suggest a free inspection — "I can check our availability for a free site visit — which day works for you?"
+4. Check availability — if they say "ASAP", "any day", "earliest", check today then tomorrow automatically. If they give a relative date ("next Monday", "in 3 days") calculate it from today's date and call check_availability
+5. Show available slots, ask them to pick one. Only accept a slot from the list you showed
+6. Collect name → phone → email one at a time naturally (do NOT ask before a slot is chosen)
+7. Once you have all three — show a confirmation summary:
    "Here's what I have:
    👤 Name: [name]
    📱 Phone: [phone]
    📧 Email: [email]
    📅 [Day, Date] at [Time]
+   🔧 Service: [service]
    Shall I confirm this booking?"
-7. Only call book_appointment AFTER user confirms. If server returns a validation error, relay the exact error message to the user and ask them to correct that field
-8. After successful booking: "✅ You're booked! See you on [date] at [time], [name]."
+8. Only call book_appointment AFTER user confirms
+9. After booking: "✅ You're booked! See you on [date] at [time], [name]."
 
 IMPORTANT RULES:
 - Never ask for name/phone/email before a slot is chosen
 - Never ask for something the user already provided in this conversation
-- Do NOT do your own validation of phone or email — just collect them and call book_appointment. The server will validate and return an error if something is wrong
-- If user gives a single name like "shafiq", ask for their last name too
+- Do NOT validate phone or email yourself — just collect and call book_appointment. Relay any server error back to the user
+- If user gives a single name, ask for their last name too
+- Include the service in the calendar booking summary field
 
 DATE RULES:
 - Never book in the past — if user asks for yesterday or a past date, politely decline and suggest tomorrow
@@ -110,13 +113,14 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "date":  {"type": "string", "description": "Date in YYYY-MM-DD format"},
-                    "time":  {"type": "string", "description": "Start time in HH:MM 24-hour format"},
-                    "name":  {"type": "string", "description": "Customer full name"},
-                    "phone": {"type": "string", "description": "Customer phone number"},
-                    "email": {"type": "string", "description": "Customer email address"}
+                    "date":    {"type": "string", "description": "Date in YYYY-MM-DD format"},
+                    "time":    {"type": "string", "description": "Start time in HH:MM 24-hour format"},
+                    "name":    {"type": "string", "description": "Customer full name"},
+                    "phone":   {"type": "string", "description": "Customer phone number"},
+                    "email":   {"type": "string", "description": "Customer email address"},
+                    "service": {"type": "string", "description": "Service requested e.g. damp survey, mould removal, roofing"}
                 },
-                "required": ["date", "time", "name", "phone", "email"]
+                "required": ["date", "time", "name", "phone", "email", "service"]
             }
         }
     }
@@ -209,26 +213,12 @@ def create_calendar_booking(args: dict) -> dict:
         return {"success": False, "error": "invalid_email",
                 "message": "That doesn't look like a valid email. Please ask the customer for a valid email (e.g. name@gmail.com)."}
 
-    # ── Phone validation: lenient — just reject obvious fakes ─────────
+    # ── Phone validation: basic pattern only ─────────
     phone = args.get("phone", "").strip()
     digits_only = re.sub(r"\D", "", phone)
-
-    # Must have between 6 and 15 digits
     if len(digits_only) < 6 or len(digits_only) > 15:
         return {"success": False, "error": "invalid_phone",
-                "message": "That doesn't look like a valid phone number. Please provide a number between 6 and 15 digits."}
-
-    # Reject all same digits: 111111, 000000, 9999999999 etc.
-    if len(set(digits_only)) == 1:
-        return {"success": False, "error": "invalid_phone",
-                "message": "That doesn't look like a real phone number. Could you double-check it?"}
-
-    # Reject obvious sequences: 123456789, 987654321
-    sequential_asc  = "0123456789"
-    sequential_desc = "9876543210"
-    if digits_only in sequential_asc or digits_only in sequential_desc:
-        return {"success": False, "error": "invalid_phone",
-                "message": "That doesn't look like a real phone number. Could you double-check it?"}
+                "message": "Please provide a valid phone number (6–15 digits)."}
 
     # ── Name validation ───────────────────────────────
     name = args.get("name", "").strip()
@@ -247,8 +237,8 @@ def create_calendar_booking(args: dict) -> dict:
         event = service.events().insert(
             calendarId=CALENDAR_ID,
             body={
-                "summary":     f"Property Inspection – {args['name']}",
-                "description": f"Customer: {args['name']}\nPhone: {args['phone']}\nEmail: {args['email']}\n\nBooked via Environ chatbot.",
+                "summary":     f"{args.get('service','Property Inspection')} – {args['name']}",
+                "description": f"Customer: {args['name']}\nPhone: {args['phone']}\nEmail: {args['email']}\nService: {args.get('service','N/A')}\n\nBooked via Environ chatbot.",
                 "start": {"dateTime": start.isoformat(), "timeZone": "Europe/London"},
                 "end":   {"dateTime": end.isoformat(),   "timeZone": "Europe/London"},
                 "reminders": {
@@ -261,7 +251,7 @@ def create_calendar_booking(args: dict) -> dict:
             }
         ).execute()
 
-        _send_whatsapp(args["name"], args["phone"], args["email"], start)
+        _send_whatsapp(args["name"], args["phone"], args["email"], start, args.get("service", "Property Inspection"))
 
         return {
             "success": True,
@@ -273,12 +263,13 @@ def create_calendar_booking(args: dict) -> dict:
         return {"success": False, "error": str(e)}
 
 
-def _send_whatsapp(name: str, phone: str, email: str, dt: datetime.datetime):
+def _send_whatsapp(name: str, phone: str, email: str, dt: datetime.datetime, service: str = "Property Inspection"):
     body = (
-        f"🏠 *New Inspection Booking – Environ Property Services*\n\n"
+        f"🏠 *New Booking – Environ Property Services*\n\n"
         f"👤 Name: {name}\n"
         f"📱 Phone: {phone}\n"
-        f"📧 Email: {email}\n\n"
+        f"📧 Email: {email}\n"
+        f"🔧 Service: {service}\n\n"
         f"📅 Date: {dt.strftime('%A, %d %B %Y')}\n"
         f"⏰ Time: {dt.strftime('%I:%M %p')}\n\n"
         f"Booked via website chatbot."
