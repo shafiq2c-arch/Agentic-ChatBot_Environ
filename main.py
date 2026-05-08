@@ -53,7 +53,7 @@ BOOKING FLOW — follow this order strictly:
 3. Suggest a free inspection — "I can check our availability for a free site visit — which day works for you?"
 4. Check availability — if they say "ASAP", "any day", "earliest", check today then tomorrow automatically. If they give a relative date ("next Monday", "in 3 days") calculate it from today's date and call check_availability
 5. Show available slots, ask them to pick one. Only accept a slot from the list you showed
-6. Collect name → phone → email one at a time naturally (do NOT ask before a slot is chosen)
+6. Collect name → phone → email one at a time (do NOT ask before a slot is chosen). For name: if user gives only one word, ask "And your last name?" right away before moving to phone
 7. Once you have all three — show a confirmation summary:
    "Here's what I have:
    👤 Name: [name]
@@ -70,9 +70,9 @@ IMPORTANT RULES:
 - When check_availability returns slots, say ONLY: "We have availability on [use the exact formatted_date from the result]! Please pick a time 👇" — do NOT list any times as text, they appear as buttons automatically
 - If the user says "sure", "ok" or anything other than a valid time slot after seeing slots, reply ONLY: "Please tap one of the time buttons above 👆" — do NOT call check_availability again or list slots again
 - Never ask for name/phone/email before a slot is chosen
-- Never ask for something the user already provided in this conversation
+- NEVER ask for something the user already gave in this conversation — scroll back through the chat and reuse it silently
 - Do NOT validate phone or email yourself — just collect and call book_appointment
-- If book_appointment returns success=false, tell the user the exact "message" field word for word. Never invent your own error message
+- If book_appointment returns success=false with an error about email or phone: ask ONLY for the corrected field, then IMMEDIATELY call book_appointment again with ALL previously collected values (date, time, name, phone, email, service, issue) — do NOT ask for any other fields again
 - If user gives only ONE word as their name, IMMEDIATELY ask "And your last name?" — do NOT move to phone until you have at least two words
 - Confirmation words — treat ALL of these as "yes, proceed": "yes", "sure", "ok", "yeah", "correct", "go ahead", "confirm", "confirmed", "please", "do it", "book it", "yep", "yup"
 - Include the service in the calendar booking summary field
@@ -284,14 +284,6 @@ def create_calendar_booking(args: dict) -> dict:
     if len(digits_only) < 6 or len(digits_only) > 15:
         return {"success": False, "error": "invalid_phone",
                 "message": "Please provide a valid phone number (6–15 digits)."}
-
-    # ── Name validation ───────────────────────────────
-    name = args.get("name", "").strip()
-    fake_names = {"name", "test", "user", "abc", "xyz", "none", "na", "n/a", "unknown"}
-    name_words = name.lower().split()
-    if len(name_words) < 2 or name_words[0] in fake_names or name_words[-1] in fake_names:
-        return {"success": False, "error": "invalid_name",
-                "message": "That doesn't look like a real full name. Please ask the customer for their actual first and last name."}
 
     try:
         dt    = datetime.datetime.strptime(f"{args['date']} {args['time']}", "%Y-%m-%d %H:%M")
