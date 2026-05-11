@@ -56,7 +56,7 @@ NEVER push or force the booking. Only enter the booking flow when the customer c
 At the end of relevant answers, you may add ONE soft line like: "If you'd like a specialist to take a look, I can arrange a free inspection — just let me know! 😊"
 
 When the customer does want to book, follow these steps one at a time:
-STEP 1 — Service: Ask "What service do you need?" (if not already known)
+STEP 1 — Service: Ask "What service do you need?" (if not already known). If you recommended a service and the user accepted it, treat that as the confirmed service — do NOT ask again.
 STEP 2 — Issue: Ask "Could you briefly describe the issue?" → Accept any reply as-is. If evasive/skip → "No problem, we can discuss on the day!" → set issue as "Will discuss on site". NEVER ask twice.
 STEP 3 — Date: Say "Which day works for you?" then call check_availability.
 STEP 4 — Time: Say ONLY "We have availability on [formatted_date]! Please pick a time 👇" — buttons appear automatically, do NOT list times as text.
@@ -904,24 +904,59 @@ def extract_booking_state(history: list) -> str:
     # ── FALLBACK: extract service from any user message ──
     # Handles the case where user mentions service upfront (e.g. "I want to book a damp survey")
     # without the bot ever asking "What service do you need?"
+    SERVICE_KEYWORDS = [
+        "damp survey", "damp proofing", "damp inspection", "damp treatment", "damp check",
+        "mould removal", "mould treatment", "mould survey", "mold removal", "mold treatment",
+        "dry rot", "wet rot", "rot treatment", "rot survey",
+        "repointing", "brick cleaning", "pointing",
+        "roofing", "roof repair", "roof inspection", "roof survey",
+        "drainage", "drain survey", "drain inspection",
+        "sash window", "window repair", "window survey",
+        "pest control", "pest inspection",
+        "waterproofing", "basement conversion",
+        "condensation survey", "condensation control", "condensation treatment",
+        "rising damp", "penetrating damp", "lateral damp",
+        "piv unit", "piv installation", "piv ventilation",
+        "property inspection", "property survey", "free inspection", "free survey",
+        "mould remediation", "damp proofing", "structural repair", "structural restoration",
+    ]
     if "service" not in collected:
-        SERVICE_KEYWORDS = [
-            "damp survey", "damp proofing", "damp inspection", "damp treatment", "damp check",
-            "mould removal", "mould treatment", "mould survey", "mold removal", "mold treatment",
-            "dry rot", "wet rot", "rot treatment", "rot survey",
-            "repointing", "brick cleaning", "pointing",
-            "roofing", "roof repair", "roof inspection", "roof survey",
-            "drainage", "drain survey", "drain inspection",
-            "sash window", "window repair", "window survey",
-            "pest control", "pest inspection",
-            "waterproofing", "basement conversion",
-            "condensation survey", "rising damp", "penetrating damp", "lateral damp",
-            "property inspection", "property survey", "free inspection", "free survey",
-        ]
         for msg_role, msg_content in msgs:
             if msg_role != "user":
                 continue
             content_lower = msg_content.lower()
+            for kw in SERVICE_KEYWORDS:
+                if kw in content_lower:
+                    collected["service"] = kw.title()
+                    break
+            if "service" in collected:
+                break
+
+    # ── FALLBACK: service confirmed from bot recommendation ──
+    # Critical case: bot recommends a service ("the best service would be X"),
+    # user confirms ("yes", "go ahead", "go ahead with this service", etc.)
+    # → capture the service name from the bot's message.
+    if "service" not in collected:
+        _CONFIRM_BOT_SVC = CONFIRM_WORDS | {
+            "go ahead", "go ahead with this", "go ahead with this service",
+            "go ahead with that service", "proceed with this", "proceed with that",
+            "that service", "this service", "that one", "this one",
+            "yes please", "sounds good", "great", "perfect", "that works",
+            "sounds great", "let's do it", "lets do it", "do that",
+        }
+        for i in range(len(msgs) - 1):
+            role, content = msgs[i]
+            next_role, next_val = msgs[i + 1]
+            if role != "assistant" or next_role != "user":
+                continue
+            nv_s = next_val.lower().strip()
+            is_confirm = (nv_s in _CONFIRM_BOT_SVC
+                          or any(nv_s.startswith(c + " ") for c in _CONFIRM_BOT_SVC)
+                          or any(nv_s == c for c in _CONFIRM_BOT_SVC))
+            if not is_confirm:
+                continue
+            # Search the bot's message for any known service keyword
+            content_lower = content.lower()
             for kw in SERVICE_KEYWORDS:
                 if kw in content_lower:
                     collected["service"] = kw.title()
