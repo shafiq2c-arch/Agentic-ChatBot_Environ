@@ -57,14 +57,32 @@ At the end of relevant answers, you may add ONE soft line like: "If you'd like a
 
 When the customer does want to book, follow these steps one at a time:
 STEP 1 — Service: Ask "What service do you need?" (if not already known). If you recommended a service and the user accepted it, treat that as the confirmed service — do NOT ask again.
-STEP 2 — Issue: If the customer already shared a photo (look for "[Photo attached]" in the conversation history), SKIP this step entirely — you have already analysed their issue from the image. Do NOT ask them to describe it again. Only ask "Could you briefly describe the issue?" if NO photo was shared. Accept any reply as-is. If evasive/skip → "No problem, we can discuss on the day!" → set issue as "Will discuss on site". NEVER ask twice.
+STEP 2 — Issues (multi-issue collection):
+  • If a photo was shared ([Photo attached] in history): you already know the issue from the image — do NOT ask the customer to describe it again. Still ask "Are you also facing any other issues I should include?"
+  • If no photo: ask "Could you describe the issue(s) you are facing?"
+  • After receiving the first issue description, ALWAYS ask: "Are you facing any other issues as well? I can include everything in a single inspection — just let me know! 😊"
+  • When the user mentions more issues using phrases like "also", "another issue", "one more thing", "and also", "plus", "as well", "additionally", "there's also" — collect each one and ask again.
+  • Only stop when the user confirms no more issues: "no", "nope", "that's all", "no more", "nothing else", "just that", "that's it", "done".
+  • NEVER start a new booking for each individual issue — ALL issues go into ONE single booking.
+  • Once all issues are collected and confirmed, proceed to STEP 3.
+
 STEP 3 — Date: Say "Which day works for you?" then call check_availability.
 STEP 4 — Time: Say ONLY "We have availability on [formatted_date]! Please pick a time 👇" — buttons appear automatically, do NOT list times as text.
 STEP 5 — Name: Ask "Could you provide your full name?"
 STEP 6 — Phone: Ask "Could you provide your phone number?"
 STEP 7 — Email: Ask "Could you provide your email address?"
-STEP 8 — Confirm: Show full summary and ask "Shall I confirm this booking?"
-STEP 9 — Book: Call book_appointment only AFTER confirmation. Then say "✅ You're booked! See you on [date] at [time], [name]."
+STEP 8 — Confirm: Show full summary. If multiple issues were reported, list them as a numbered list. Format:
+  "Here's a summary of your booking:
+  • Service: [service]
+  • Issues reported:
+    1. [first issue]
+    2. [second issue] (if applicable)
+  • Date: [date]  • Time: [time]
+  • Name: [name]
+  • Phone: [phone]
+  • Email: [email]
+  Shall I confirm this booking?"
+STEP 9 — Book: Call book_appointment only AFTER confirmation. Pass ALL issues combined as the issue field. Then say "✅ You're booked! See you on [date] at [time], [name]."
 
 ━━━ BOOKING RULES ━━━
 - The BOOKING STATE block injected above this message shows what is already collected. NEVER re-ask for a ✅ field. Jump to the stated NEXT STEP.
@@ -1079,6 +1097,84 @@ def extract_booking_state(history: list) -> str:
                 collected["email"] = em.group(0)
                 break
 
+    # ── MULTI-ISSUE ACCUMULATION ──
+    # Collect all issues mentioned across the conversation; detect "no more" gate.
+    _MORE_ISSUE_RE = re.compile(
+        r'\b(?:also|another issue|one more(?:\s+thing)?|and\s+(?:also|another)|'
+        r'plus|as well|additionally|same problem|there\'?s also|'
+        r'furthermore|in addition|on top of that|i also have|i also got|'
+        r'there\'?s another|another thing|and\s+there\'?s|i have another)\b',
+        re.IGNORECASE
+    )
+    _NO_MORE_SET = {
+        "no", "nope", "no more", "that's all", "that is all", "nothing else",
+        "just those", "just that", "no other", "nothing more", "those are all",
+        "that's it", "thats it", "that's everything", "done", "no other issues",
+        "no more issues", "that covers it", "just these issues", "just this one",
+        "that should be it", "no nothing else", "none", "no that's all",
+        "that's about it", "just the one issue", "only that one", "only one",
+        "just the one", "nothing more to add",
+    }
+
+    extra_issues = []
+    _issues_complete = False
+
+    # Scan Q&A pairs: when bot asks "any other issues?", capture user's answer
+    for i in range(len(msgs) - 1):
+        role, content = msgs[i]
+        next_role, next_val = msgs[i + 1]
+        if role != "assistant" or next_role != "user":
+            continue
+        lc = content.lower()
+        nv_lower = next_val.lower().strip()
+        if ("any other issues" in lc or "other issues" in lc
+                or "other problems" in lc or "anything else to include" in lc
+                or "anything else i should know" in lc):
+            if (nv_lower in _NO_MORE_SET
+                    or any(nv_lower.startswith(p) for p in _NO_MORE_SET)):
+                _issues_complete = True
+            elif nv_lower not in CONFIRM_WORDS and len(next_val.strip()) > 3:
+                extra_issues.append(next_val.strip())
+
+    # Scan ALL user messages for follow-up issue trigger phrases
+    for msg_role, msg_content in msgs:
+        if msg_role != "user":
+            continue
+        if _MORE_ISSUE_RE.search(msg_content):
+            # Strip the trigger phrase and use remaining text as the extra issue
+            cleaned = _MORE_ISSUE_RE.sub('', msg_content).strip().strip(',. ')
+            if (cleaned and len(cleaned) > 5
+                    and cleaned.lower() not in {x.lower() for x in extra_issues}
+                    and cleaned.lower() != collected.get("issue", "").lower()):
+                extra_issues.append(cleaned)
+
+    # Merge extra issues into collected["issue"] as a combined string
+    if extra_issues:
+        base = collected.get("issue", "")
+        all_issues = []
+        if base and base not in ("Will discuss on site",):
+            all_issues.append(base)
+        for iss in extra_issues:
+            if iss not in all_issues:
+                all_issues.append(iss)
+        if len(all_issues) > 1:
+            numbered = "\n".join(f"{idx+1}. {iss}" for idx, iss in enumerate(all_issues))
+            collected["issue"] = numbered
+        elif all_issues:
+            collected["issue"] = all_issues[0]
+
+    # Set issues_complete flag
+    if _issues_complete:
+        collected["issues_complete"] = True
+    # Auto-complete: user skipped issue entirely OR date is already chosen (past that stage)
+    elif collected.get("issue") == "Will discuss on site":
+        collected["issues_complete"] = True
+    elif "date_chosen" in collected or "time_slot" in collected:
+        collected["issues_complete"] = True
+    # Auto-complete: issue came from a photo (already known)
+    elif "issue" in collected and collected["issue"].startswith("Photo submitted"):
+        collected["issues_complete"] = True
+
     if not collected:
         return ""
 
@@ -1097,30 +1193,39 @@ def extract_booking_state(history: list) -> str:
 
     # ── Build structured state block ──────────────────
     label_map = {
-        "service":      "🔧 Service",
-        "issue":        "⚠️  Issue",
-        "date_chosen":  "📅 Date",
-        "time_slot":    "⏰ Time",
-        "name":         "👤 Name",
-        "phone":        "📱 Phone",
-        "email":        "📧 Email",
+        "service":         "🔧 Service",
+        "issue":           "⚠️  Issues",
+        "issues_complete": "✔️  Issues finalised",
+        "date_chosen":     "📅 Date",
+        "time_slot":       "⏰ Time",
+        "name":            "👤 Name",
+        "phone":           "📱 Phone",
+        "email":           "📧 Email",
     }
-    ORDERED = ["service", "issue", "date_chosen", "time_slot", "name", "phone", "email"]
+    ORDERED = ["service", "issue", "issues_complete", "date_chosen", "time_slot", "name", "phone", "email"]
 
     lines = ["━━━ BOOKING STATE (injected by system — highest priority) ━━━"]
     for key in ORDERED:
         if key in collected:
-            lines.append(f"  ✅ {label_map[key]}: {collected[key]}")
+            val = collected[key]
+            if key == "issues_complete":
+                lines.append(f"  ✅ {label_map[key]}: Yes — proceed to date")
+            else:
+                lines.append(f"  ✅ {label_map[key]}: {val}")
 
     # Determine exactly what to do next — only push booking steps when in booking mode
     if _booking_intent or _mid_flow:
         if "service" not in collected:
             next_step = 'Ask: "What service do you need?"'
         elif "issue" not in collected:
-            next_step = ('Ask: "Could you briefly describe the issue?" — '
-                         'then accept the VERY NEXT reply as-is, even one word. Move on immediately.')
+            next_step = ('Ask: "Could you describe the issue(s) you are facing?" — '
+                         'accept the VERY NEXT reply as-is. Then ask about other issues.')
+        elif "issues_complete" not in collected:
+            next_step = ('Ask: "Are you facing any other issues as well? I can include everything '
+                         'in a single inspection — just let me know! 😊 If not, just say no." '
+                         'Collect more issues if yes; set issues_complete if user says no/done/that\'s all.')
         elif "date_chosen" not in collected and "time_slot" not in collected:
-            next_step = 'Ask which day works and call check_availability. Do NOT ask for issue again.'
+            next_step = 'All issues collected ✅. Ask which day works and call check_availability.'
         elif "time_slot" not in collected:
             next_step = 'Wait for user to pick a time slot from the buttons.'
         elif "name" not in collected:
@@ -1130,7 +1235,8 @@ def extract_booking_state(history: list) -> str:
         elif "email" not in collected:
             next_step = 'Ask: "Could you provide your email address?"'
         else:
-            next_step = 'Show full confirmation summary and ask "Shall I confirm this booking?"'
+            next_step = ('Show full confirmation summary — list ALL issues as a numbered list — '
+                         'and ask "Shall I confirm this booking?"')
         lines.append(f"\n  ⏭  NEXT STEP: {next_step}")
         lines.append("  🚫 DO NOT re-ask for any ✅ field above — they are final.")
     else:
