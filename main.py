@@ -57,7 +57,7 @@ At the end of relevant answers, you may add ONE soft line like: "If you'd like a
 
 When the customer does want to book, follow these steps one at a time:
 STEP 1 — Service: Ask "What service do you need?" (if not already known). If you recommended a service and the user accepted it, treat that as the confirmed service — do NOT ask again.
-STEP 2 — Issue: Ask "Could you briefly describe the issue?" → Accept any reply as-is. If evasive/skip → "No problem, we can discuss on the day!" → set issue as "Will discuss on site". NEVER ask twice.
+STEP 2 — Issue: If the customer already shared a photo (look for "[Photo attached]" in the conversation history), SKIP this step entirely — you have already analysed their issue from the image. Do NOT ask them to describe it again. Only ask "Could you briefly describe the issue?" if NO photo was shared. Accept any reply as-is. If evasive/skip → "No problem, we can discuss on the day!" → set issue as "Will discuss on site". NEVER ask twice.
 STEP 3 — Date: Say "Which day works for you?" then call check_availability.
 STEP 4 — Time: Say ONLY "We have availability on [formatted_date]! Please pick a time 👇" — buttons appear automatically, do NOT list times as text.
 STEP 5 — Name: Ask "Could you provide your full name?"
@@ -85,6 +85,7 @@ Reschedule: ask email → find_booking → ask new day → check_availability �
 
 ━━━ IMAGES ━━━
 When a customer sends a photo: study it carefully, describe what you can see (damp patches, mould, staining, cracks, rot, etc.), identify the likely issue and its severity, and give useful advice. Always acknowledge the image — never say you cannot see or process it.
+If the customer later refers back to a photo they sent earlier (e.g. "I already shared the picture", "can you review it", "I sent you a photo"), acknowledge that you saw and analysed their image in your earlier response. Refer back to what you found. Do NOT ask them to describe their issue again.
 
 SERVICES: Damp (rising/penetrating/lateral/condensation), mould removal, dry/wet rot, repointing, brick cleaning, heritage restoration, roofing, drainage, sash windows, pest control.
 COMPANY: Environ Property Services — family-run, London-based, 15+ years, PCA-accredited, TrustMark registered. Free inspections available.
@@ -900,6 +901,36 @@ def extract_booking_state(history: list) -> str:
             parsed = parse_time_to_hhmm(next_val)
             if parsed:
                 collected["time_slot"] = parsed
+
+    # ── FALLBACK: auto-populate issue from photo ──
+    # If the user shared a photo and the bot analysed it, use the bot's analysis
+    # as the issue — never ask "describe your issue" again when a photo was sent.
+    if "issue" not in collected:
+        _DAMAGE_WORDS = {
+            "mould", "mold", "damp", "rot", "leak", "crack", "stain",
+            "condensation", "penetrating", "rising", "water", "peeling",
+            "discolouration", "discoloration", "patch", "patches", "black spot",
+            "fungal", "structural", "subsidence", "pest", "damp patch",
+        }
+        for i, (role, content) in enumerate(msgs):
+            if role != "user" or "[photo attached]" not in content.lower():
+                continue
+            # Find the bot's next response to this image message
+            for j in range(i + 1, len(msgs)):
+                bot_role, bot_content = msgs[j]
+                if bot_role != "assistant":
+                    continue
+                bot_lc = bot_content.lower()
+                if any(w in bot_lc for w in _DAMAGE_WORDS):
+                    # Extract first meaningful sentence as issue summary
+                    sentences = [s.strip() for s in re.split(r'[.!?]', bot_content) if len(s.strip()) > 20]
+                    summary = sentences[0][:150] if sentences else "Property issue shown in photo"
+                    collected["issue"] = f"Photo submitted — {summary}"
+                else:
+                    collected["issue"] = "Property issue shown in submitted photo"
+                break
+            if "issue" in collected:
+                break
 
     # ── FALLBACK: extract service from any user message ──
     # Handles the case where user mentions service upfront (e.g. "I want to book a damp survey")
