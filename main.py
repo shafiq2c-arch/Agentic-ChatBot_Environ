@@ -1,12 +1,13 @@
 """
 Environ Property Services — Agentic Chatbot
-Booking-focused with Google Calendar + Twilio WhatsApp
+Booking-focused with Google Calendar + Gmail notifications
 """
 import os
 import json
 import re
 import datetime
 import pytz
+import socket as _socket
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -31,12 +32,20 @@ CHROMA_PATH        = "./chroma_db"
 COLLECTION_NAME    = "environ_knowledge"
 CALENDAR_ID        = "shafiq2c2c@gmail.com"
 LONDON_TZ          = pytz.timezone("Europe/London")
-WORK_START_H       = 9   # 9 AM
-WORK_END_H         = 18  # 6 PM
+WORK_START_H       = 9    # 9 AM
+WORK_END_H         = 18   # 6 PM
 SLOT_DURATION_H    = 1
-
 GOOGLE_CREDS_FILE  = "google_credentials.json"
 NOTIFY_EMAIL       = "aiagentsautomation87@gmail.com"
+_GCAL_TIMEOUT      = 10   # seconds — hard socket timeout for all Google API calls
+
+# Date-asking trigger phrases (used to show the date picker)
+_DATE_ASK_TRIGGERS = [
+    'which day', 'what day', 'when would', 'day works', 'day suits',
+    'preferred date', 'preferred day', 'works for you', 'what date',
+    'which date', 'choose a date', 'pick a date', 'when suits',
+    'what day works', 'what day suits', 'pick a day',
+]
 
 # ── System prompt ──────────────────────────────────
 SYSTEM_PROMPT_TEMPLATE = """You are Alex, a knowledgeable and friendly property specialist at Environ Property Services, London.
@@ -198,8 +207,8 @@ TOOLS = [
 ]
 
 # ── Global clients ─────────────────────────────────
-openai_client: OpenAI       = None
-chroma_collection           = None
+openai_client: OpenAI = None
+chroma_collection     = None
 
 
 @asynccontextmanager
@@ -211,7 +220,7 @@ async def lifespan(app: FastAPI):
         name=COLLECTION_NAME,
         metadata={"hnsw:space": "cosine"},
     )
-    print(f"ChromaDB ready — {chroma_collection.count()} chunks")
+    print(f"ChromaDB ready — {chroma_collection.count()} chunks", flush=True)
     yield
 
 
@@ -222,9 +231,6 @@ app.add_middleware(
 
 
 # ── Google Calendar helpers ────────────────────────
-import socket as _socket
-
-_GCAL_TIMEOUT = 10  # seconds — hard socket timeout for all Google API calls
 
 def get_calendar_service():
     with open(GOOGLE_CREDS_FILE) as f:
@@ -232,20 +238,23 @@ def get_calendar_service():
     creds = service_account.Credentials.from_service_account_info(
         info, scopes=["https://www.googleapis.com/auth/calendar"]
     )
-    return build("calendar", "v3", credentials=creds)
+    # cache_discovery=False avoids file-lock issues in multi-threaded containers
+    return build("calendar", "v3", credentials=creds, cache_discovery=False)
 
 
 def check_calendar_availability(date_str: str) -> dict:
-    _prev_timeout = _socket.getdefaulttimeout()
+    _prev = _socket.getdefaulttimeout()
     _socket.setdefaulttimeout(_GCAL_TIMEOUT)
     try:
         dt = datetime.datetime.strptime(date_str, "%Y-%m-%d")
-        if dt.weekday() == 6:  # Sunday
-            return {"available": False, "message": "We don't work on Sundays. Please choose Monday–Saturday.", "slots": []}
+        if dt.weekday() == 6:
+            return {"available": False, "slots": [],
+                    "message": "We don't work on Sundays. Please choose Monday–Saturday."}
         if dt.date() < datetime.date.today():
-            return {"available": False, "message": "That date is in the past. Please choose a future date.", "slots": []}
+            return {"available": False, "slots": [],
+                    "message": "That date is in the past. Please choose a future date."}
 
-        service = get_calendar_service()
+        service   = get_calendar_service()
         day_start = LONDON_TZ.localize(dt.replace(hour=WORK_START_H, minute=0, second=0, microsecond=0))
         day_end   = LONDON_TZ.localize(dt.replace(hour=WORK_END_H,   minute=0, second=0, microsecond=0))
 
@@ -256,14 +265,16 @@ def check_calendar_availability(date_str: str) -> dict:
         }).execute()
 
         busy_periods = result.get("calendars", {}).get(CALENDAR_ID, {}).get("busy", [])
-
-        free_slots = []
-        cursor = day_start
+        free_slots, cursor = [], day_start
         while cursor < day_end:
             slot_end = cursor + datetime.timedelta(hours=SLOT_DURATION_H)
             is_busy = any(
-                cursor < pytz.utc.localize(datetime.datetime.fromisoformat(b["end"].replace("Z", ""))).astimezone(LONDON_TZ) and
-                slot_end > pytz.utc.localize(datetime.datetime.fromisoformat(b["start"].replace("Z", ""))).astimezone(LONDON_TZ)
+                cursor < pytz.utc.localize(
+                    datetime.datetime.fromisoformat(b["end"].replace("Z", ""))
+                ).astimezone(LONDON_TZ) and
+                slot_end > pytz.utc.localize(
+                    datetime.datetime.fromisoformat(b["start"].replace("Z", ""))
+                ).astimezone(LONDON_TZ)
                 for b in busy_periods
             )
             if not is_busy:
@@ -271,76 +282,69 @@ def check_calendar_availability(date_str: str) -> dict:
             cursor = slot_end
 
         return {
-            "date": date_str,
+            "date":           date_str,
             "formatted_date": dt.strftime("%A, %d %B %Y"),
-            "available": len(free_slots) > 0,
-            "slots": free_slots,
-            "message": "" if free_slots else "No free slots on this date. Please try another day."
+            "available":      len(free_slots) > 0,
+            "slots":          free_slots,
+            "message":        "" if free_slots else "No free slots on this date. Please try another day."
         }
     except Exception as e:
         print(f"[CALENDAR ERROR] check_availability: {e}", flush=True)
         # Fallback: return all standard slots so the bot can still show time buttons.
         # The booking step does a live double-check before creating the calendar event.
-        _dt_fallback = datetime.datetime.strptime(date_str, "%Y-%m-%d")
-        _fallback_slots = [
-            f"{h:02d}:00"
-            for h in range(WORK_START_H, WORK_END_H)
-        ]
+        _dt = datetime.datetime.strptime(date_str, "%Y-%m-%d")
         return {
-            "date": date_str,
-            "formatted_date": _dt_fallback.strftime("%A, %d %B %Y"),
-            "available": True,
-            "slots": _fallback_slots,
-            "message": "",
-            "_fallback": True,   # internal flag — not shown to user
+            "date":           date_str,
+            "formatted_date": _dt.strftime("%A, %d %B %Y"),
+            "available":      True,
+            "slots":          [f"{h:02d}:00" for h in range(WORK_START_H, WORK_END_H)],
+            "message":        "",
+            "_fallback":      True,
         }
     finally:
-        _socket.setdefaulttimeout(_prev_timeout)
+        _socket.setdefaulttimeout(_prev)
 
 
 def create_calendar_booking(args: dict) -> dict:
-    # ── Basic sanity checks only ──────────────────────
     email = args.get("email", "").strip()
     if "@" not in email or "." not in email.split("@")[-1]:
         return {"success": False, "error": "invalid_email",
                 "message": "The email address must contain @ and a domain (e.g. name@gmail.com)."}
 
     phone = args.get("phone", "").strip()
-    digits_only = re.sub(r"\D", "", phone)
-    if len(digits_only) < 6:
+    if len(re.sub(r"\D", "", phone)) < 6:
         return {"success": False, "error": "invalid_phone",
                 "message": "Please provide a valid phone number."}
 
-    _prev_timeout = _socket.getdefaulttimeout()
+    _prev = _socket.getdefaulttimeout()
     _socket.setdefaulttimeout(_GCAL_TIMEOUT)
     try:
         dt    = datetime.datetime.strptime(f"{args['date']} {args['time']}", "%Y-%m-%d %H:%M")
         start = LONDON_TZ.localize(dt)
         end   = start + datetime.timedelta(hours=SLOT_DURATION_H)
-
         service = get_calendar_service()
 
-        # Guard against double-booking: check the slot is still free right now
+        # Guard against double-booking
         busy_check = service.freebusy().query(body={
             "timeMin": start.isoformat(),
             "timeMax": end.isoformat(),
             "items":   [{"id": CALENDAR_ID}]
         }).execute()
-        busy_now = busy_check.get("calendars", {}).get(CALENDAR_ID, {}).get("busy", [])
-        if busy_now:
+        if busy_check.get("calendars", {}).get(CALENDAR_ID, {}).get("busy", []):
             return {"success": False, "error": "slot_taken",
-                    "message": f"The {args['time']} slot on {args['date']} was just taken. Please check availability again and pick another slot."}
+                    "message": f"The {args['time']} slot on {args['date']} was just taken. "
+                               "Please check availability again and pick another slot."}
 
-        event = service.events().insert(
+        service.events().insert(
             calendarId=CALENDAR_ID,
             body={
-                "summary":     f"{args.get('service','Property Inspection')} – {args['name']}",
+                "summary":     f"{args.get('service', 'Property Inspection')} – {args['name']}",
                 "description": (
                     f"Customer: {args['name']}\n"
                     f"Phone: {args['phone']}\n"
                     f"Email: {args['email']}\n"
-                    f"Service: {args.get('service','N/A')}\n"
-                    f"Issue: {args.get('issue','N/A')}\n\n"
+                    f"Service: {args.get('service', 'N/A')}\n"
+                    f"Issue: {args.get('issue', 'N/A')}\n\n"
                     f"Booked via Environ chatbot."
                 ),
                 "start": {"dateTime": start.isoformat(), "timeZone": "Europe/London"},
@@ -355,92 +359,50 @@ def create_calendar_booking(args: dict) -> dict:
             }
         ).execute()
 
-        # Email notification is best-effort — never block the booking if it fails
-        notes = []
-        svc   = args.get("service", "Property Inspection")
-        issue = args.get("issue", "N/A")
-
         try:
-            _send_email_notification(args["name"], args["phone"], args["email"], start, svc, issue)
+            _send_email_notification(
+                args["name"], args["phone"], args["email"], start,
+                args.get("service", "Property Inspection"), args.get("issue", "N/A")
+            )
         except Exception as em_err:
             print(f"[EMAIL ERROR] {em_err}", flush=True)
-            notes.append(f"Email failed: {em_err}")
 
         return {
-            "success": True,
+            "success":        True,
             "formatted_date": start.strftime("%A, %d %B %Y"),
             "formatted_time": start.strftime("%I:%M %p"),
-            "name": args["name"],
-            "note": "; ".join(notes)
+            "name":           args["name"],
         }
     except Exception as e:
         print(f"[BOOKING ERROR] {e}", flush=True)
         return {"success": False, "error": str(e), "message": f"Booking failed: {e}"}
     finally:
-        _socket.setdefaulttimeout(_prev_timeout)
-
-
-def _send_email_notification(name: str, phone: str, email: str, dt: datetime.datetime,
-                              service: str = "Property Inspection", issue: str = "N/A"):
-    gmail_user     = os.getenv("GMAIL_SENDER")       # your gmail address used to send
-    gmail_password = os.getenv("GMAIL_APP_PASSWORD")  # 16-char app password (not your login password)
-    if not gmail_user or not gmail_password:
-        raise ValueError("GMAIL_SENDER or GMAIL_APP_PASSWORD not set in environment")
-
-    subject = f"📅 New Booking – {name} | {dt.strftime('%d %b %Y %I:%M %p')}"
-
-    html = f"""
-    <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;border:1px solid #e0e0e0;border-radius:8px;overflow:hidden;">
-      <div style="background:#1a6b3c;padding:20px 24px;">
-        <h2 style="color:#fff;margin:0">🏠 New Booking – Environ Property Services</h2>
-      </div>
-      <div style="padding:24px;background:#f9f9f9;">
-        <table style="width:100%;border-collapse:collapse;">
-          <tr><td style="padding:8px 0;color:#555;width:120px;">👤 Name</td><td style="padding:8px 0;font-weight:bold;">{name}</td></tr>
-          <tr><td style="padding:8px 0;color:#555;">📱 Phone</td><td style="padding:8px 0;">{phone}</td></tr>
-          <tr><td style="padding:8px 0;color:#555;">📧 Email</td><td style="padding:8px 0;">{email}</td></tr>
-          <tr><td style="padding:8px 0;color:#555;">🔧 Service</td><td style="padding:8px 0;">{service}</td></tr>
-          <tr><td style="padding:8px 0;color:#555;">⚠️ Issue</td><td style="padding:8px 0;">{issue}</td></tr>
-          <tr><td style="padding:8px 0;color:#555;">📅 Date</td><td style="padding:8px 0;font-weight:bold;">{dt.strftime('%A, %d %B %Y')}</td></tr>
-          <tr><td style="padding:8px 0;color:#555;">⏰ Time</td><td style="padding:8px 0;font-weight:bold;">{dt.strftime('%I:%M %p')}</td></tr>
-        </table>
-      </div>
-      <div style="padding:12px 24px;background:#e8f5ee;font-size:13px;color:#555;">
-        Booked via the Environ website chatbot.
-      </div>
-    </div>
-    """
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"]    = gmail_user
-    msg["To"]      = NOTIFY_EMAIL
-    msg.attach(MIMEText(html, "html"))
-
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(gmail_user, gmail_password)
-        server.sendmail(gmail_user, NOTIFY_EMAIL, msg.as_string())
+        _socket.setdefaulttimeout(_prev)
 
 
 def find_customer_booking(email: str) -> dict:
+    _prev = _socket.getdefaulttimeout()
+    _socket.setdefaulttimeout(_GCAL_TIMEOUT)
     try:
-        service  = get_calendar_service()
+        service = get_calendar_service()
         _now    = datetime.datetime.now(datetime.timezone.utc)
         now     = _now.strftime("%Y-%m-%dT%H:%M:%SZ")
         future  = (_now + datetime.timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        result   = service.events().list(
+        result  = service.events().list(
             calendarId=CALENDAR_ID, timeMin=now, timeMax=future,
             q=email, singleEvents=True, orderBy="startTime"
         ).execute()
         events = result.get("items", [])
         if not events:
-            return {"found": False, "message": f"No upcoming bookings found for {email}. Please double-check the email address."}
+            return {"found": False,
+                    "message": f"No upcoming bookings found for {email}. Please double-check the email address."}
 
-        event = events[0]
+        event     = events[0]
         start_raw = event["start"].get("dateTime", event["start"].get("date"))
-        dt = datetime.datetime.fromisoformat(start_raw.replace("Z", "+00:00")).astimezone(LONDON_TZ)
+        dt        = datetime.datetime.fromisoformat(
+                        start_raw.replace("Z", "+00:00")
+                    ).astimezone(LONDON_TZ)
 
-        # Parse customer name from description
         name = ""
         for line in event.get("description", "").split("\n"):
             if line.startswith("Customer:"):
@@ -462,16 +424,21 @@ def find_customer_booking(email: str) -> dict:
     except Exception as e:
         print(f"[FIND BOOKING ERROR] {e}", flush=True)
         return {"found": False, "message": f"Error searching bookings: {e}"}
+    finally:
+        _socket.setdefaulttimeout(_prev)
 
 
 def cancel_customer_booking(event_id: str) -> dict:
+    _prev = _socket.getdefaulttimeout()
+    _socket.setdefaulttimeout(_GCAL_TIMEOUT)
     try:
-        service = get_calendar_service()
-        event   = service.events().get(calendarId=CALENDAR_ID, eventId=event_id).execute()
+        service   = get_calendar_service()
+        event     = service.events().get(calendarId=CALENDAR_ID, eventId=event_id).execute()
         start_raw = event["start"].get("dateTime", event["start"].get("date"))
-        dt = datetime.datetime.fromisoformat(start_raw.replace("Z", "+00:00")).astimezone(LONDON_TZ)
+        dt        = datetime.datetime.fromisoformat(
+                        start_raw.replace("Z", "+00:00")
+                    ).astimezone(LONDON_TZ)
 
-        # Parse name
         name = ""
         for line in event.get("description", "").split("\n"):
             if line.startswith("Customer:"):
@@ -486,18 +453,23 @@ def cancel_customer_booking(event_id: str) -> dict:
             print(f"[CANCEL EMAIL ERROR] {em_err}", flush=True)
 
         return {
-            "success":  True,
-            "message":  f"Booking on {dt.strftime('%A, %d %B %Y')} at {dt.strftime('%I:%M %p')} has been cancelled successfully."
+            "success": True,
+            "message": f"Booking on {dt.strftime('%A, %d %B %Y')} at {dt.strftime('%I:%M %p')} "
+                       "has been cancelled successfully."
         }
     except Exception as e:
         print(f"[CANCEL ERROR] {e}", flush=True)
         return {"success": False, "message": f"Cancellation failed: {e}"}
+    finally:
+        _socket.setdefaulttimeout(_prev)
 
 
 def reschedule_customer_booking(event_id: str, new_date: str, new_time: str) -> dict:
+    _prev = _socket.getdefaulttimeout()
+    _socket.setdefaulttimeout(_GCAL_TIMEOUT)
     try:
-        service = get_calendar_service()
-        event   = service.events().get(calendarId=CALENDAR_ID, eventId=event_id).execute()
+        service   = get_calendar_service()
+        event     = service.events().get(calendarId=CALENDAR_ID, eventId=event_id).execute()
 
         new_dt    = datetime.datetime.strptime(f"{new_date} {new_time}", "%Y-%m-%d %H:%M")
         new_start = LONDON_TZ.localize(new_dt)
@@ -510,33 +482,40 @@ def reschedule_customer_booking(event_id: str, new_date: str, new_time: str) -> 
             "items":   [{"id": CALENDAR_ID}]
         }).execute()
         if busy_check.get("calendars", {}).get(CALENDAR_ID, {}).get("busy", []):
-            return {"success": False, "message": f"The {new_time} slot on {new_date} is already taken. Please check availability and pick another slot."}
+            return {"success": False,
+                    "message": f"The {new_time} slot on {new_date} is already taken. "
+                               "Please check availability and pick another slot."}
 
-        # Get old datetime for email
         old_raw = event["start"].get("dateTime", event["start"].get("date"))
-        old_dt  = datetime.datetime.fromisoformat(old_raw.replace("Z", "+00:00")).astimezone(LONDON_TZ)
+        old_dt  = datetime.datetime.fromisoformat(
+                      old_raw.replace("Z", "+00:00")
+                  ).astimezone(LONDON_TZ)
 
-        # Parse name
         name = ""
         for line in event.get("description", "").split("\n"):
             if line.startswith("Customer:"):
                 name = line.replace("Customer:", "").strip()
                 break
 
-        # Create new event FIRST, then delete old — so if insert fails the original is preserved
+        # Create new event FIRST — so if insert fails the original booking is preserved
         service.events().insert(
             calendarId=CALENDAR_ID,
             body={
                 "summary":     event.get("summary", "Property Inspection"),
-                "description": event.get("description", "") + f"\n\nRescheduled from {old_dt.strftime('%A, %d %B %Y at %I:%M %p')}",
+                "description": event.get("description", "") +
+                               f"\n\nRescheduled from {old_dt.strftime('%A, %d %B %Y at %I:%M %p')}",
                 "start": {"dateTime": new_start.isoformat(), "timeZone": "Europe/London"},
                 "end":   {"dateTime": new_end.isoformat(),   "timeZone": "Europe/London"},
                 "reminders": {
                     "useDefault": False,
-                    "overrides": [{"method": "email", "minutes": 60}, {"method": "popup", "minutes": 30}]
+                    "overrides": [
+                        {"method": "email", "minutes": 60},
+                        {"method": "popup", "minutes": 30}
+                    ]
                 }
             }
         ).execute()
+        # Only delete old event after new one is confirmed created
         service.events().delete(calendarId=CALENDAR_ID, eventId=event_id).execute()
 
         try:
@@ -553,6 +532,46 @@ def reschedule_customer_booking(event_id: str, new_date: str, new_time: str) -> 
     except Exception as e:
         print(f"[RESCHEDULE ERROR] {e}", flush=True)
         return {"success": False, "message": f"Reschedule failed: {e}"}
+    finally:
+        _socket.setdefaulttimeout(_prev)
+
+
+# ── Email helpers ──────────────────────────────────
+
+def _send_email_notification(name: str, phone: str, email: str, dt: datetime.datetime,
+                              service: str = "Property Inspection", issue: str = "N/A"):
+    gmail_user = os.getenv("GMAIL_SENDER")
+    gmail_pw   = os.getenv("GMAIL_APP_PASSWORD")
+    if not gmail_user or not gmail_pw:
+        raise ValueError("GMAIL_SENDER or GMAIL_APP_PASSWORD not set")
+
+    html = f"""
+    <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;border:1px solid #e0e0e0;border-radius:8px;overflow:hidden;">
+      <div style="background:#1a6b3c;padding:20px 24px;">
+        <h2 style="color:#fff;margin:0">🏠 New Booking – Environ Property Services</h2>
+      </div>
+      <div style="padding:24px;background:#f9f9f9;">
+        <table style="width:100%;border-collapse:collapse;">
+          <tr><td style="padding:8px 0;color:#555;width:120px;">👤 Name</td><td style="padding:8px 0;font-weight:bold;">{name}</td></tr>
+          <tr><td style="padding:8px 0;color:#555;">📱 Phone</td><td style="padding:8px 0;">{phone}</td></tr>
+          <tr><td style="padding:8px 0;color:#555;">📧 Email</td><td style="padding:8px 0;">{email}</td></tr>
+          <tr><td style="padding:8px 0;color:#555;">🔧 Service</td><td style="padding:8px 0;">{service}</td></tr>
+          <tr><td style="padding:8px 0;color:#555;">⚠️ Issue</td><td style="padding:8px 0;">{issue}</td></tr>
+          <tr><td style="padding:8px 0;color:#555;">📅 Date</td><td style="padding:8px 0;font-weight:bold;">{dt.strftime('%A, %d %B %Y')}</td></tr>
+          <tr><td style="padding:8px 0;color:#555;">⏰ Time</td><td style="padding:8px 0;font-weight:bold;">{dt.strftime('%I:%M %p')}</td></tr>
+        </table>
+      </div>
+      <div style="padding:12px 24px;background:#e8f5ee;font-size:13px;color:#555;">Booked via the Environ website chatbot.</div>
+    </div>"""
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"📅 New Booking – {name} | {dt.strftime('%d %b %Y %I:%M %p')}"
+    msg["From"]    = gmail_user
+    msg["To"]      = NOTIFY_EMAIL
+    msg.attach(MIMEText(html, "html"))
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+        s.login(gmail_user, gmail_pw)
+        s.sendmail(gmail_user, NOTIFY_EMAIL, msg.as_string())
 
 
 def _send_cancel_email(name: str, dt: datetime.datetime, summary: str = "Property Inspection"):
@@ -574,10 +593,12 @@ def _send_cancel_email(name: str, dt: datetime.datetime, summary: str = "Propert
     </div>"""
     msg = MIMEMultipart("alternative")
     msg["Subject"] = f"❌ Booking Cancelled – {name or 'Customer'} | {dt.strftime('%d %b %Y')}"
-    msg["From"] = gmail_user; msg["To"] = NOTIFY_EMAIL
+    msg["From"] = gmail_user
+    msg["To"]   = NOTIFY_EMAIL
     msg.attach(MIMEText(html, "html"))
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
-        s.login(gmail_user, gmail_pw); s.sendmail(gmail_user, NOTIFY_EMAIL, msg.as_string())
+        s.login(gmail_user, gmail_pw)
+        s.sendmail(gmail_user, NOTIFY_EMAIL, msg.as_string())
 
 
 def _send_reschedule_email(name: str, old_dt: datetime.datetime, new_dt: datetime.datetime):
@@ -598,14 +619,17 @@ def _send_reschedule_email(name: str, old_dt: datetime.datetime, new_dt: datetim
     </div>"""
     msg = MIMEMultipart("alternative")
     msg["Subject"] = f"🔄 Booking Rescheduled – {name or 'Customer'} | {new_dt.strftime('%d %b %Y')}"
-    msg["From"] = gmail_user; msg["To"] = NOTIFY_EMAIL
+    msg["From"] = gmail_user
+    msg["To"]   = NOTIFY_EMAIL
     msg.attach(MIMEText(html, "html"))
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
-        s.login(gmail_user, gmail_pw); s.sendmail(gmail_user, NOTIFY_EMAIL, msg.as_string())
+        s.login(gmail_user, gmail_pw)
+        s.sendmail(gmail_user, NOTIFY_EMAIL, msg.as_string())
 
 
+# ── Tool executor ──────────────────────────────────
 _TOOL_EXECUTOR = ThreadPoolExecutor(max_workers=4)
-_TOOL_TIMEOUT  = 15  # seconds — hard ceiling on any Google Calendar / booking call
+_TOOL_TIMEOUT  = 15  # seconds
 
 def execute_tool(name: str, args: dict) -> dict:
     def _run():
@@ -622,13 +646,13 @@ def execute_tool(name: str, args: dict) -> dict:
         return {"error": "Unknown tool"}
 
     try:
-        future = _TOOL_EXECUTOR.submit(_run)
-        return future.result(timeout=_TOOL_TIMEOUT)
+        return _TOOL_EXECUTOR.submit(_run).result(timeout=_TOOL_TIMEOUT)
     except FuturesTimeoutError:
         print(f"[TOOL TIMEOUT] {name} exceeded {_TOOL_TIMEOUT}s", flush=True)
         return {"available": False, "slots": [], "success": False,
-                "message": "The calendar service is taking too long to respond. Please try again in a moment."}
+                "message": "The calendar service is taking too long. Please try again in a moment."}
     except Exception as e:
+        print(f"[TOOL ERROR] {name}: {e}", flush=True)
         return {"error": str(e), "available": False, "slots": []}
 
 
@@ -658,17 +682,12 @@ class ChatRequest(BaseModel):
     image_base64: Optional[str] = None
     image_mime_type: Optional[str] = "image/jpeg"
     history: list[HistoryMessage] = []
-    session_id: Optional[str] = None   # for future logging/tracking
+    session_id: Optional[str] = None
 
-
-CONFIRM_WORDS = {"yes","sure","ok","okay","yeah","correct","go ahead","confirm",
-                 "confirmed","please","do it","book it","yep","yup","done"}
 
 # ── Guardrails ─────────────────────────────────────
+INPUT_MAX_CHARS = 600
 
-INPUT_MAX_CHARS = 600   # hard cap on user message length
-
-# Days that cannot exist in certain months
 _MONTH_MAX_DAYS = {
     "feb": 29, "february": 29,
     "apr": 30, "april": 30,
@@ -678,41 +697,29 @@ _MONTH_MAX_DAYS = {
 }
 
 def validate_input(message: str) -> dict:
-    """
-    Run all input guardrails. Returns {"ok": True} or {"ok": False, "reply": "..."}
-    """
     s = message.strip()
 
-    # 1. Empty
     if not s:
         return {"ok": False, "reply": "Please type a message and I'll be happy to help! 😊"}
 
-    # 2. Max length
     if len(s) > INPUT_MAX_CHARS:
         return {"ok": False, "reply": (
             f"Your message is too long ({len(s)} characters — max {INPUT_MAX_CHARS}). "
             "Could you shorten it, or split it across a couple of messages?"
         )}
 
-    # 3. Non-English script (Arabic, Chinese, Cyrillic, Hindi, etc.)
-    #    Count chars above Unicode 591 that are letters — high ratio = non-Latin script
     non_latin = sum(1 for c in s if c.isalpha() and ord(c) > 591)
     if len(s) > 8 and non_latin / max(len(s), 1) > 0.25:
         return {"ok": False, "reply": (
-            "I can only assist in English. Please write your message in English "
-            "and I'll be glad to help! 😊"
+            "I can only assist in English. Please write your message in English and I'll be glad to help! 😊"
         )}
 
-    # 4. Spam / gibberish — same character repeated 10+ times
     if re.search(r'(.)\1{9,}', s):
         return {"ok": False, "reply": (
-            "That doesn't look like a valid message. "
-            "Please describe your property issue and I'll help you out!"
+            "That doesn't look like a valid message. Please describe your property issue and I'll help you out!"
         )}
 
-    # 5. Invalid date: day number that cannot exist
     s_lower = s.lower()
-    # Day > 31 for any month
     m = re.search(
         r'\b(3[2-9]|[4-9]\d|\d{3,})\s*(?:st|nd|rd|th)?\s+'
         r'(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|'
@@ -724,15 +731,11 @@ def validate_input(message: str) -> dict:
             f"Hmm, that date doesn't seem right — there's no **{m.group(0)}**. "
             "Could you double-check and let me know the correct date?"
         )}
-    # Day 0
     if re.search(
-        r'\b0+\s*(?:st|nd|rd|th)?\s+'
-        r'(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\b', s_lower
+        r'\b0+\s*(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\b', s_lower
     ):
-        return {"ok": False, "reply": (
-            "Day 0 doesn't exist! Could you double-check the date you meant?"
-        )}
-    # Month-specific overflows (e.g. Feb 30, April 31)
+        return {"ok": False, "reply": "Day 0 doesn't exist! Could you double-check the date you meant?"}
+
     m2 = re.search(
         r'\b(3[01]|29|30)\s*(?:st|nd|rd|th)?\s+'
         r'(feb(?:ruary)?|apr(?:il)?|jun(?:e)?|sep(?:tember)?|nov(?:ember)?)\b',
@@ -745,15 +748,13 @@ def validate_input(message: str) -> dict:
                 f"That date isn't valid — **{m2.group(0)}** doesn't exist. "
                 "Please pick a real date and I'll check availability for you!"
             )}
-    # Month name given as number > 12
+
     m3 = re.search(r'\b(1[3-9]|[2-9]\d)\s*/\s*\d{4}\b', s_lower)
     if m3:
         return {"ok": False, "reply": (
-            f"Month {m3.group(1)} doesn't exist — there are only 12 months. "
-            "Could you double-check the date?"
+            f"Month {m3.group(1)} doesn't exist — there are only 12 months. Could you double-check the date?"
         )}
 
-    # 6. Prompt injection attempts
     _INJECT = [
         r'ignore\s+(your|all|previous)\s+(instructions?|rules?|prompt)',
         r'you\s+are\s+now\b',
@@ -767,11 +768,9 @@ def validate_input(message: str) -> dict:
     for pat in _INJECT:
         if re.search(pat, s_lower):
             return {"ok": False, "reply": (
-                "I'm here to help with property and home-related questions only! "
-                "What can I help you with today? 😊"
+                "I'm here to help with property and home-related questions only! What can I help you with today? 😊"
             )}
 
-    # 7. Format-forcing / data-format demands (not relevant to a property chatbot)
     _FORMAT_PATTERNS = [
         r'\b(?:as|in|using)\s+(?:json|xml|csv|html|yaml|code|markdown|latex)\b',
         r'\bformat(?:ted)?\s+(?:as|in)\b',
@@ -782,11 +781,10 @@ def validate_input(message: str) -> dict:
     ]
     if any(re.search(p, s_lower) for p in _FORMAT_PATTERNS):
         return {"ok": False, "reply": (
-            "I'm a property support assistant — I can't output data in technical formats like JSON, XML or code. "
+            "I'm a property support assistant — I can't output data in technical formats. "
             "I'm happy to explain services, causes, treatments, or help you book an inspection. What would you like to know? 😊"
         )}
 
-    # 8. Profanity / abusive language
     _PROFANITY = [
         r'\bf[\*u][c\*]k', r'\bs[h\*][i\*]t\b', r'\bb[i\*]tch\b',
         r'\bc[u\*]nt\b',   r'\bwanker\b',        r'\btwat\b',
@@ -796,19 +794,15 @@ def validate_input(message: str) -> dict:
     ]
     if any(re.search(p, s_lower) for p in _PROFANITY):
         return {"ok": False, "reply": (
-            "Please keep the conversation respectful and I'll be happy to help "
-            "with your property needs! 😊"
+            "Please keep the conversation respectful and I'll be happy to help with your property needs! 😊"
         )}
 
-    # 8. URL / link injection (prevent phishing links in chat)
     if re.search(r'https?://', s_lower):
         return {"ok": False, "reply": (
             "Please don't include web links in your message. Just describe your "
             "property issue in your own words and I'll help you out!"
         )}
 
-    # 9. Excessive symbols / special-character spam
-    #    If more than 55% of characters are non-alphanumeric (excl. spaces & common punctuation)
     symbols = sum(1 for c in s if not c.isalnum() and c not in " .,!?'-@:/()")
     if len(s) > 10 and symbols / max(len(s), 1) > 0.55:
         return {"ok": False, "reply": (
@@ -820,35 +814,26 @@ def validate_input(message: str) -> dict:
 
 
 def validate_output(text: str) -> str:
-    """
-    Run output guardrails on the fully assembled bot response.
-    Returns the original text, a sanitised version, or a safe fallback.
-    """
     if not text:
         return text
 
-    # 0. Strip literal HTML tags that GPT-4o sometimes outputs (e.g. <br> inside table cells)
+    # Strip HTML tags GPT-4o sometimes outputs
     text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
     text = re.sub(
         r'</?(?:b|i|u|em|strong|span|div|p|table|tr|td|th|thead|tbody|hr)\b[^>]*>',
         '', text, flags=re.IGNORECASE
     )
 
-    # 1. Non-English output — GPT-4o should never do this, but safety net
     non_latin = sum(1 for c in text if c.isalpha() and ord(c) > 591)
     if len(text) > 30 and non_latin / max(len(text), 1) > 0.25:
         return ("I'm sorry, something went wrong with my response. "
                 "Could you rephrase your question and I'll try again?")
 
-    # 2. Internal Python error strings leaking into the response
-    _LEAK = ['traceback (most recent', 'file "/', 'line ', 'syntaxerror',
-             'valueerror', 'keyerror', 'attributeerror']
     tl = text.lower()
-    if any(p in tl for p in _LEAK[:2]):   # only the most obvious leaks
+    if any(p in tl for p in ['traceback (most recent', 'file "/']):
         return ("I ran into a small technical issue. "
                 "Please try again or contact us directly — we're happy to help!")
 
-    # 3. Excessive length safety valve — trim gracefully at sentence boundary
     MAX_OUTPUT_CHARS = 1200
     if len(text) > MAX_OUTPUT_CHARS:
         cut = text[:MAX_OUTPUT_CHARS]
@@ -860,48 +845,22 @@ def validate_output(text: str) -> str:
 
     return text
 
-def parse_time_to_hhmm(text: str):
-    """
-    Convert a time expression to HH:MM 24-hour string, or return None.
-    Handles: "14:00", "2pm", "2 pm", "2:30pm", "9am", "9 am", "9:00am"
-    """
-    t = text.strip().lower()
-    # Already exact HH:MM
-    if re.match(r"^\d{1,2}:\d{2}$", t):
-        h, m = t.split(":")
-        return f"{int(h):02d}:{m}"
-    # 12-hour with am/pm, optional minutes: "2pm", "2 pm", "2:30pm", "14pm" etc.
-    m = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", t)
-    if m:
-        h    = int(m.group(1))
-        mins = m.group(2) or "00"
-        ampm = m.group(3)
-        if ampm == "pm" and h != 12:
-            h += 12
-        elif ampm == "am" and h == 12:
-            h = 0
-        if 0 <= h <= 23:
-            return f"{h:02d}:{mins}"
-    return None
+
+# ── Booking state extractor ────────────────────────
 
 def extract_booking_state(history: list) -> str:
     """
-    AI-powered booking state extractor.
-    Uses GPT-4o-mini to read the conversation and return a clean JSON state,
-    then formats it into a structured block injected into the main prompt.
-    Replaces the old 500-line regex machine — robust to any phrasing.
+    AI-powered booking state extractor. Uses GPT-4o-mini to read the conversation
+    and return a structured BOOKING STATE block injected into the main prompt.
     """
     if not history or not openai_client:
         return ""
 
     today = datetime.date.today().strftime("%A, %d %B %Y")
-
-    # Build compact transcript (last 30 messages)
     transcript_lines = []
     for m in history[-30:]:
         role_label = "Customer" if m.role == "user" else "Agent"
-        text = m.content.strip()[:400]
-        transcript_lines.append(f"{role_label}: {text}")
+        transcript_lines.append(f"{role_label}: {m.content.strip()[:400]}")
     transcript = "\n".join(transcript_lines)
 
     extraction_prompt = f"""You are a booking state extractor for a property inspection chatbot.
@@ -948,7 +907,6 @@ Conversation:
         print(f"[STATE EXTRACTOR ERROR] {e}", flush=True)
         return ""
 
-    # ── Nothing collected yet → no state block needed ──
     if not state.get("booking_intent") and not any([
         state.get("service"), state.get("issues"), state.get("name"),
         state.get("date"), state.get("time"), state.get("email"),
@@ -958,9 +916,7 @@ Conversation:
     issues_list = state.get("issues") or []
     issues_text = "\n".join(f"    {i+1}. {iss}" for i, iss in enumerate(issues_list))
 
-    # ── Build structured state block ──────────────────
     lines = ["━━━ BOOKING STATE (injected by system — highest priority) ━━━"]
-
     if state.get("service"):
         lines.append(f"  ✅ 🔧 Service: {state['service']}")
     if issues_list:
@@ -978,10 +934,8 @@ Conversation:
     if state.get("email"):
         lines.append(f"  ✅ 📧 Email: {state['email']}")
 
-    # ── Determine NEXT STEP ────────────────────────────
     _booking_active = state.get("booking_intent") or len([
-        f for f in ["service", "date", "time", "name", "phone", "email"]
-        if state.get(f)
+        f for f in ["service", "date", "time", "name", "phone", "email"] if state.get(f)
     ]) >= 1 or bool(issues_list)
 
     if _booking_active:
@@ -1034,19 +988,17 @@ Conversation:
 
 
 def build_messages(req: ChatRequest) -> tuple[list, str]:
-    today  = datetime.date.today().strftime("%A, %d %B %Y")
-    system = SYSTEM_PROMPT_TEMPLATE.format(today=today)
+    today   = datetime.date.today().strftime("%A, %d %B %Y")
+    system  = SYSTEM_PROMPT_TEMPLATE.format(today=today)
     context = retrieve_context(req.message)
 
     messages = [{"role": "system", "content": system}]
     for m in req.history[-20:]:
         messages.append({"role": m.role, "content": m.content})
 
-    # Inject booking state as a SYSTEM message immediately before the user's
-    # current message — this position gets maximum attention from the model.
-    # Include current user message in extraction so the state already reflects
-    # the answer the user just gave (e.g. name, phone) and skips to next step.
-    temp_history = list(req.history) + [HistoryMessage(role="user", content=req.message)]
+    # Include current message so the state extractor already reflects
+    # the answer the user just gave (name/phone/etc.) and skips to next step.
+    temp_history  = list(req.history) + [HistoryMessage(role="user", content=req.message)]
     session_state = extract_booking_state(temp_history)
     if session_state:
         messages.append({"role": "system", "content": session_state})
@@ -1068,14 +1020,12 @@ def build_messages(req: ChatRequest) -> tuple[list, str]:
         user_content = user_text
 
     messages.append({"role": "user", "content": user_content})
-    return messages, "gpt-4o"   # gpt-4o for all — much better context tracking
+    return messages, "gpt-4o"
 
 
 # ── Chat endpoint ──────────────────────────────────
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
-    import time as _time
-    _t_start = _time.time()
     # ── Input guardrail ────────────────────────────
     guard = validate_input(req.message)
     if not guard["ok"]:
@@ -1088,31 +1038,27 @@ async def chat(req: ChatRequest):
         return StreamingResponse(_blocked(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache"})
 
-    print(f"[TIMING] validate_input done: +{_time.time()-_t_start:.2f}s", flush=True)
-    messages, model = build_messages(req)
-    print(f"[TIMING] build_messages done (incl. extract_booking_state): +{_time.time()-_t_start:.2f}s", flush=True)
-
     def generate():
-        import time as _time2
-        _tg = _time2.time()
-        # ── Detect booking stage from injected BOOKING STATE block ──────────
-        # If date is collected but time slot is not, FORCE check_availability
-        # so slot buttons always appear — never rely on GPT-4o choosing the tool.
+        # build_messages runs here (inside the thread) so it never blocks the async event loop.
+        # This includes the gpt-4o-mini extract_booking_state call and the ChromaDB embedding.
+        messages, model = build_messages(req)
+
+        # ── Detect booking stage ────────────────────────────────────────────
+        # If date is collected but time is not, FORCE check_availability so
+        # slot buttons always appear — never rely on GPT-4o choosing the tool.
         _state_text = " ".join(
             m["content"] for m in messages
             if isinstance(m.get("content"), str) and "BOOKING STATE" in m.get("content", "")
         )
-        _has_date   = "📅 Date:" in _state_text
-        _has_time   = "⏰ Time:" in _state_text
+        _has_date  = "📅 Date:" in _state_text
+        _has_time  = "⏰ Time:" in _state_text
         _forced_tool_choice = (
             {"type": "function", "function": {"name": "check_availability"}}
             if _has_date and not _has_time
             else "auto"
         )
-        print(f"[TIMING] generate() setup done, forced={_has_date and not _has_time}: +{_time2.time()-_tg:.2f}s", flush=True)
 
-        # Step 1: non-streaming call (supports tool detection)
-        print(f"[TIMING] calling OpenAI #1 (gpt-4o, tool_choice={_forced_tool_choice})...", flush=True)
+        # Step 1: non-streaming call — detects tool calls
         response = openai_client.chat.completions.create(
             model=model,
             messages=messages,
@@ -1122,22 +1068,18 @@ async def chat(req: ChatRequest):
             temperature=0.4,
         )
         choice = response.choices[0]
-        _has_tool_calls = bool(choice.message.tool_calls)
-        print(f"[TIMING] OpenAI #1 done, finish_reason={choice.finish_reason}, tool_calls={_has_tool_calls}: +{_time2.time()-_tg:.2f}s", flush=True)
 
-        if _has_tool_calls:
-            # Step 2: execute every tool call
-            msg = choice.message
+        # Check tool_calls directly — GPT-4o sometimes returns finish_reason="stop"
+        # even for forced tool calls; the tool_calls field is the reliable indicator.
+        if choice.message.tool_calls:
+            msg          = choice.message
             tool_results = []
-            ui_events    = []   # deferred UI events sent after text stream
+            ui_events    = []
 
             for tc in msg.tool_calls:
                 args   = json.loads(tc.function.arguments)
-                print(f"[TIMING] execute_tool({tc.function.name}) start: +{_time2.time()-_tg:.2f}s", flush=True)
                 result = execute_tool(tc.function.name, args)
-                print(f"[TIMING] execute_tool({tc.function.name}) done: +{_time2.time()-_tg:.2f}s", flush=True)
 
-                # Queue a slot-picker UI event for the frontend
                 if tc.function.name == "check_availability" and result.get("slots"):
                     ui_events.append({
                         "ui":             "slots",
@@ -1146,7 +1088,7 @@ async def chat(req: ChatRequest):
                         "slots":          result["slots"]
                     })
 
-                # If slot just taken — auto re-check availability so buttons appear
+                # Slot just taken — re-check via execute_tool (has timeout protection)
                 if tc.function.name == "book_appointment" and result.get("error") == "slot_taken":
                     avail = execute_tool("check_availability", {"date": args["date"]})
                     if avail.get("slots"):
@@ -1156,23 +1098,22 @@ async def chat(req: ChatRequest):
                             "formatted_date": avail.get("formatted_date", avail["date"]),
                             "slots":          avail["slots"]
                         })
-                        result["new_availability"] = avail  # give AI the fresh slots in its context
+                        result["new_availability"] = avail
 
                 tool_results.append({
-                    "role": "tool",
+                    "role":         "tool",
                     "tool_call_id": tc.id,
-                    "content": json.dumps(result)
+                    "content":      json.dumps(result)
                 })
 
-            # Build follow-up messages including assistant + tool results
             follow_up = messages + [
                 {
-                    "role": "assistant",
-                    "content": msg.content,
+                    "role":       "assistant",
+                    "content":    msg.content,
                     "tool_calls": [
                         {
-                            "id": tc.id,
-                            "type": "function",
+                            "id":       tc.id,
+                            "type":     "function",
                             "function": {"name": tc.function.name, "arguments": tc.function.arguments}
                         }
                         for tc in msg.tool_calls
@@ -1180,8 +1121,7 @@ async def chat(req: ChatRequest):
                 }
             ] + tool_results
 
-            # Step 3: buffer streaming response then apply output guardrail
-            print(f"[TIMING] calling OpenAI #2 (follow-up stream)...", flush=True)
+            # Step 2: follow-up streaming response
             stream = openai_client.chat.completions.create(
                 model=model,
                 messages=follow_up,
@@ -1194,42 +1134,26 @@ async def chat(req: ChatRequest):
                 delta = chunk.choices[0].delta.content
                 if delta:
                     raw_text += delta
-            print(f"[TIMING] OpenAI #2 done: +{_time2.time()-_tg:.2f}s", flush=True)
-            safe_text = validate_output(raw_text)
-            words = safe_text.split(" ")
-            for i, w in enumerate(words):
-                yield f"data: {json.dumps({'token': w + (' ' if i < len(words)-1 else '')})}\n\n"
 
-            # Step 4: after text, emit UI events so buttons appear below the bubble
+            safe_text = validate_output(raw_text)
+            for i, w in enumerate(safe_text.split(" ")):
+                yield f"data: {json.dumps({'token': w + (' ' if i < len(safe_text.split(' '))-1 else '')})}\n\n"
+
+            # Emit slot / datepicker UI events after the text
             for evt in ui_events:
                 yield f"data: {json.dumps(evt)}\n\n"
 
-            # Emit datepicker event if bot is asking for a date (and no slot UI already queued)
-            _DATE_ASK_TRIGGERS = [
-                'which day', 'what day', 'when would', 'day works', 'day suits',
-                'preferred date', 'preferred day', 'works for you', 'what date',
-                'which date', 'choose a date', 'pick a date', 'when suits',
-                'what day works', 'what day suits', 'pick a day',
-            ]
             _has_slot_ui = any(e.get("ui") == "slots" for e in ui_events)
             if not _has_slot_ui and any(t in safe_text.lower() for t in _DATE_ASK_TRIGGERS):
                 yield f"data: {json.dumps({'ui': 'datepicker'})}\n\n"
 
         else:
-            # No tool call — apply output guardrail then stream word-by-word
+            # No tool call — stream the direct response
             content = validate_output(choice.message.content or "")
-            words = content.split(" ")
-            for i, word in enumerate(words):
-                token = word + (" " if i < len(words) - 1 else "")
+            for i, word in enumerate(content.split(" ")):
+                token = word + (" " if i < len(content.split(" ")) - 1 else "")
                 yield f"data: {json.dumps({'token': token})}\n\n"
 
-            # Emit datepicker event if bot is asking for a date
-            _DATE_ASK_TRIGGERS = [
-                'which day', 'what day', 'when would', 'day works', 'day suits',
-                'preferred date', 'preferred day', 'works for you', 'what date',
-                'which date', 'choose a date', 'pick a date', 'when suits',
-                'what day works', 'what day suits', 'pick a day',
-            ]
             if any(t in content.lower() for t in _DATE_ASK_TRIGGERS):
                 yield f"data: {json.dumps({'ui': 'datepicker'})}\n\n"
 
@@ -1239,11 +1163,10 @@ async def chat(req: ChatRequest):
         """Wraps generate() so any uncaught exception still sends [DONE] to the client."""
         try:
             yield from generate()
-        except Exception as _gen_err:
-            print(f"[GENERATE ERROR] {_gen_err}", flush=True)
+        except Exception as err:
+            print(f"[GENERATE ERROR] {err}", flush=True)
             import traceback; traceback.print_exc()
-            _err_msg = "I ran into a technical issue. Please try again or contact us directly — we're happy to help!"
-            yield f"data: {json.dumps({'token': _err_msg})}\n\n"
+            yield f"data: {json.dumps({'token': 'I ran into a technical issue. Please try again or contact us directly!'})}\n\n"
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(
