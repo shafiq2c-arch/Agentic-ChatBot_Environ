@@ -1118,6 +1118,8 @@ def extract_booking_state(history: list) -> str:
 
     extra_issues = []
     _issues_complete = False
+    _pending_more_issue = False   # user said "yes" to more issues but hasn't described yet
+    _other_issues_asked_count = 0
 
     # Scan Q&A pairs: when bot asks "any other issues?", capture user's answer
     for i in range(len(msgs) - 1):
@@ -1127,14 +1129,26 @@ def extract_booking_state(history: list) -> str:
             continue
         lc = content.lower()
         nv_lower = next_val.lower().strip()
-        if ("any other issues" in lc or "other issues" in lc
+        if ("any other issues" in lc or "other issues as well" in lc
                 or "other problems" in lc or "anything else to include" in lc
                 or "anything else i should know" in lc):
+            _other_issues_asked_count += 1
             if (nv_lower in _NO_MORE_SET
                     or any(nv_lower.startswith(p) for p in _NO_MORE_SET)):
                 _issues_complete = True
-            elif nv_lower not in CONFIRM_WORDS and len(next_val.strip()) > 3:
+                _pending_more_issue = False
+            elif nv_lower in CONFIRM_WORDS:
+                # User said "yes/yeah/sure" — they have more but haven't described yet
+                _pending_more_issue = True
+            elif len(next_val.strip()) > 3:
+                # User described the issue directly
                 extra_issues.append(next_val.strip())
+                _pending_more_issue = False
+
+    # Auto-complete: if we've looped 3+ times without resolution, break the cycle
+    if _other_issues_asked_count >= 3 and not _issues_complete:
+        _issues_complete = True
+        _pending_more_issue = False
 
     # Scan ALL user messages for follow-up issue trigger phrases
     for msg_role, msg_content in msgs:
@@ -1221,9 +1235,14 @@ def extract_booking_state(history: list) -> str:
             next_step = ('Ask: "Could you describe the issue(s) you are facing?" — '
                          'accept the VERY NEXT reply as-is. Then ask about other issues.')
         elif "issues_complete" not in collected:
-            next_step = ('Ask: "Are you facing any other issues as well? I can include everything '
-                         'in a single inspection — just let me know! 😊 If not, just say no." '
-                         'Collect more issues if yes; set issues_complete if user says no/done/that\'s all.')
+            if _pending_more_issue:
+                next_step = ('User confirmed they have another issue. Ask: '
+                             '"Please describe that issue briefly." '
+                             '— accept the VERY NEXT reply as-is as the issue description.')
+            else:
+                next_step = ('Ask: "Are you facing any other issues as well? I can include everything '
+                             'in a single inspection — just let me know! 😊 If not, just say no." '
+                             'Collect more issues if yes; set issues_complete if user says no/done/that\'s all.')
         elif "date_chosen" not in collected and "time_slot" not in collected:
             next_step = ('All issues collected ✅. Ask: "Which day works for you?" '
                          '— do NOT call check_availability yet, wait for the user to give a date first.')
