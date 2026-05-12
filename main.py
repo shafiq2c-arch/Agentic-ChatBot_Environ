@@ -523,8 +523,7 @@ def reschedule_customer_booking(event_id: str, new_date: str, new_time: str) -> 
                 name = line.replace("Customer:", "").strip()
                 break
 
-        # Delete old, create new
-        service.events().delete(calendarId=CALENDAR_ID, eventId=event_id).execute()
+        # Create new event FIRST, then delete old — so if insert fails the original is preserved
         service.events().insert(
             calendarId=CALENDAR_ID,
             body={
@@ -538,6 +537,7 @@ def reschedule_customer_booking(event_id: str, new_date: str, new_time: str) -> 
                 }
             }
         ).execute()
+        service.events().delete(calendarId=CALENDAR_ID, eventId=event_id).execute()
 
         try:
             _send_reschedule_email(name, old_dt, new_start)
@@ -1148,7 +1148,7 @@ async def chat(req: ChatRequest):
 
                 # If slot just taken — auto re-check availability so buttons appear
                 if tc.function.name == "book_appointment" and result.get("error") == "slot_taken":
-                    avail = check_calendar_availability(args["date"])
+                    avail = execute_tool("check_availability", {"date": args["date"]})
                     if avail.get("slots"):
                         ui_events.append({
                             "ui":             "slots",
@@ -1235,8 +1235,19 @@ async def chat(req: ChatRequest):
 
         yield "data: [DONE]\n\n"
 
+    def safe_generate():
+        """Wraps generate() so any uncaught exception still sends [DONE] to the client."""
+        try:
+            yield from generate()
+        except Exception as _gen_err:
+            print(f"[GENERATE ERROR] {_gen_err}", flush=True)
+            import traceback; traceback.print_exc()
+            _err_msg = "I ran into a technical issue. Please try again or contact us directly — we're happy to help!"
+            yield f"data: {json.dumps({'token': _err_msg})}\n\n"
+            yield "data: [DONE]\n\n"
+
     return StreamingResponse(
-        generate(),
+        safe_generate(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"}
     )
