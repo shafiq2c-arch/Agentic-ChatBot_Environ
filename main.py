@@ -279,7 +279,21 @@ def check_calendar_availability(date_str: str) -> dict:
         }
     except Exception as e:
         print(f"[CALENDAR ERROR] check_availability: {e}", flush=True)
-        return {"available": False, "slots": [], "message": f"Calendar error: {e}"}
+        # Fallback: return all standard slots so the bot can still show time buttons.
+        # The booking step does a live double-check before creating the calendar event.
+        _dt_fallback = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+        _fallback_slots = [
+            f"{h:02d}:00"
+            for h in range(WORK_START_H, WORK_END_H)
+        ]
+        return {
+            "date": date_str,
+            "formatted_date": _dt_fallback.strftime("%A, %d %B %Y"),
+            "available": True,
+            "slots": _fallback_slots,
+            "message": "",
+            "_fallback": True,   # internal flag — not shown to user
+        }
     finally:
         _socket.setdefaulttimeout(_prev_timeout)
 
