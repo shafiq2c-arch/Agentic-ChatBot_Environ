@@ -1122,9 +1122,10 @@ async def chat(req: ChatRequest):
             temperature=0.4,
         )
         choice = response.choices[0]
-        print(f"[TIMING] OpenAI #1 done, finish_reason={choice.finish_reason}: +{_time2.time()-_tg:.2f}s", flush=True)
+        _has_tool_calls = bool(choice.message.tool_calls)
+        print(f"[TIMING] OpenAI #1 done, finish_reason={choice.finish_reason}, tool_calls={_has_tool_calls}: +{_time2.time()-_tg:.2f}s", flush=True)
 
-        if choice.finish_reason == "tool_calls":
+        if _has_tool_calls:
             # Step 2: execute every tool call
             msg = choice.message
             tool_results = []
