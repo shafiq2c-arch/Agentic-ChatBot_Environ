@@ -1227,7 +1227,15 @@ def extract_booking_state(history: list) -> str:
         elif "date_chosen" not in collected and "time_slot" not in collected:
             next_step = 'All issues collected ✅. Ask which day works and call check_availability.'
         elif "time_slot" not in collected:
-            next_step = 'Wait for user to pick a time slot from the buttons.'
+            date_ref = collected.get("date_chosen", "the chosen date")
+            next_step = (
+                f'MUST call check_availability for "{date_ref}" (convert to YYYY-MM-DD). '
+                'This is mandatory — it sends the slot buttons to the frontend. '
+                'After the tool returns, say ONLY: '
+                '"We have availability on [formatted_date]! Please pick a time 👇" '
+                '— do NOT list times as text, do NOT skip the tool call, '
+                'even if the user asked an unrelated question.'
+            )
         elif "name" not in collected:
             next_step = 'Ask: "Could you provide your full name?"'
         elif "phone" not in collected:
