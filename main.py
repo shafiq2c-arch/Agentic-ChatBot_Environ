@@ -92,6 +92,7 @@ STEP 8 — Confirm: Show full summary. If multiple issues were reported, list th
   • Phone: [phone]
   • Email: [email]
   Shall I confirm this booking?"
+  DATE RULE FOR SUMMARY: Always use the EXACT "formatted_date" returned by the check_availability tool (e.g. "Thursday, 14 May 2026") — never the date as the customer typed it.
 STEP 9 — Book: Call book_appointment only AFTER confirmation. Pass ALL issues combined as the issue field. Then say "✅ You're booked! See you on [date] at [time], [name]."
 
 ━━━ BOOKING RULES ━━━
@@ -104,16 +105,28 @@ STEP 9 — Book: Call book_appointment only AFTER confirmation. Pass ALL issues 
 - book_appointment needs: date, time, name, phone, email, service, issue — all 7 fields.
 
 ━━━ CANCEL / RESCHEDULE ━━━
-Cancel: ask email → find_booking → confirm with user → cancel_booking.
-Reschedule: ask email → find_booking → ask new day → check_availability → confirm → reschedule_booking.
+CRITICAL: When the customer uses words like "cancel", "reschedule", "move my appointment", "change my booking" — enter the cancel/reschedule flow IMMEDIATELY. Do NOT ask "What service do you need?" or start a new booking flow.
+
+CANCEL RULES (follow strictly — no shortcuts):
+1. Detect cancel intent from: "cancel", "cancel my booking", "cancel my appointment", "I want to cancel".
+2. Ask for the customer's email address if not already provided.
+3. Call find_booking(email) immediately — never skip this step, never ask for service/issues.
+4. If find_booking returns found:false → say "I couldn't find a booking for [email]. Could you double-check the email or try a different one?" Stay in the cancel flow — do NOT start a new booking.
+5. If find_booking returns found:true → show the booking details and ask: "Shall I go ahead and cancel your [service] on [date] at [time]?"
+6. Call cancel_booking(event_id) only after the customer confirms. Then confirm the cancellation.
 
 RESCHEDULE RULES (follow strictly — no shortcuts):
-1. You MUST call find_booking(email) FIRST before anything else, even if the user gives email + new date in the same message. Never skip this step.
-2. After find_booking succeeds, tell the user: "I found your booking: [service] on [formatted_date] at [formatted_time]. I'll reschedule that for you." Then ask what new day they want (if not already stated).
-3. Store the event_id from find_booking in your working memory — you MUST pass it to reschedule_booking later.
-4. Only after you have event_id AND new_date AND new_time: call check_availability, show slots, get confirmation, then call reschedule_booking(event_id, new_date, new_time).
-5. If the user mentions BOTH a reschedule AND a new booking in the same message: complete the RESCHEDULE FLOW fully first. Only start the new booking flow after reschedule_booking succeeds.
-6. If reschedule_booking returns success:false — tell the user clearly what went wrong (e.g. "That slot is already taken, please pick another time" or "I couldn't find your booking — please double-check the email address"). Do NOT ask for the email again in a loop.
+1. Detect reschedule intent from: "reschedule", "move my appointment", "change the date", "move it to", "rebook".
+2. Do NOT treat a reschedule request as a new booking — NEVER ask "What service do you need?" or "Could you describe the issue(s)".
+3. Ask for the customer's email address if not already provided.
+4. You MUST call find_booking(email) FIRST before anything else. Never skip this step.
+5. After find_booking succeeds, tell the user: "I found your booking: [service] on [formatted_date] at [formatted_time]. I'll reschedule that for you."
+6. IMPORTANT — date carry-forward: if the customer already mentioned a new date and/or time (even in their very first message, before find_booking was called), use it directly after find_booking — do NOT ask for the date again. Call check_availability for that date immediately.
+7. If no new date was mentioned anywhere in the conversation, ask: "What new date would you like to move it to?"
+8. Store the event_id from find_booking in your memory — you MUST pass it to reschedule_booking.
+9. Once you have event_id + new_date + new_time: call check_availability, show slot buttons, get confirmation, then call reschedule_booking(event_id, new_date, new_time).
+10. Stay in the reschedule flow for the entire conversation until reschedule_booking succeeds or the user explicitly abandons it. Do NOT fall back to the new-booking flow at any point.
+11. If reschedule_booking returns success:false — tell the user clearly what went wrong. Do NOT ask for the email again in a loop.
 
 ━━━ DATE RULES ━━━
 - No Sundays. No past dates. Today is {today}.
@@ -884,27 +897,42 @@ Be conservative — when uncertain, use null. Today is {today}.
 
 Return ONLY a valid JSON object with these fields:
 {{
-  "booking_intent": true or false,
+  "intent": "new_booking" or "reschedule" or "cancel" or "support",
   "service": "service name or null",
-  "issues": ["list of distinct property issues mentioned — deduplicated, no meta-comments like 'its an issue' or 'same thing'"],
+  "issues": ["list of distinct property issues — deduplicated, no meta-comments like 'its an issue'"],
   "issues_complete": true or false,
   "pending_more_issue": true or false,
-  "date": "date as the customer said it, or null",
-  "time": "HH:MM 24h format or null",
+  "date": "date as the customer said it (for NEW bookings only), or null",
+  "time": "HH:MM 24h format (for NEW bookings only), or null",
   "name": "full name or null",
   "phone": "phone number or null",
-  "email": "email address or null"
+  "email": "email address or null",
+  "reschedule_email": "email the customer gave for reschedule/cancel lookup, or null",
+  "reschedule_new_date": "new date the customer wants for reschedule (as stated), or null",
+  "reschedule_new_time": "HH:MM 24h format of new time for reschedule, or null",
+  "find_booking_done": true or false,
+  "find_booking_failed": true or false
 }}
 
 Field rules:
-- booking_intent: true if customer expressed intent to book/schedule/arrange an inspection
-- service: extract from customer message OR from agent recommendation the customer accepted
-- issues: list every distinct property issue the customer mentioned. Deduplicate. Ignore frustrated meta-replies like "its an issue", "i already said", "same thing", "that's the issue"
-- issues_complete: true ONLY if customer explicitly said no more issues ("no", "nope", "that's all", "nothing else", "done", "just that one") OR if date/time are already chosen (past that stage)
-- pending_more_issue: true if the LAST exchange was agent asking "any other issues?" and customer replied "yes/yeah/sure" WITHOUT describing a new issue
-- date: only if customer gave a specific date (e.g. "Monday 19 May 2026") or clicked a date button
-- time: only if customer selected a specific time slot or typed a time — convert to HH:MM 24h
-- name/phone/email: only if customer explicitly provided these
+- intent:
+    "new_booking" = customer wants a NEW inspection/appointment
+    "reschedule" = customer wants to MOVE/CHANGE/RESCHEDULE an existing booking
+    "cancel" = customer wants to CANCEL an existing booking
+    "support" = questions only, no booking action
+    If the customer mentioned reschedule or cancel at ANY point in the conversation, keep intent as "reschedule" or "cancel" — do NOT switch to "new_booking" just because date/time info appeared
+- service: extract from customer message OR from agent recommendation the customer accepted — for NEW bookings only
+- issues: every distinct property issue the customer mentioned. Deduplicate. Ignore meta-replies
+- issues_complete: true ONLY if customer said no more issues ("no", "nope", "that's all", "nothing else", "done") OR date/time already chosen
+- pending_more_issue: true if agent asked "any other issues?" and customer replied "yes/yeah" WITHOUT describing a new issue
+- date: ONLY for new bookings — specific date given or date button clicked
+- time: ONLY for new bookings — time slot selected or typed, converted to HH:MM 24h
+- name/phone/email: ONLY if customer explicitly provided these for a NEW booking
+- reschedule_email: the email the customer provided when asking to reschedule or cancel
+- reschedule_new_date: new date customer wants for reschedule (look through ALL messages, including early ones)
+- reschedule_new_time: new time for reschedule in HH:MM 24h format
+- find_booking_done: true if agent said "I found your booking" or similar success message
+- find_booking_failed: true if agent said "no booking found", "couldn't find a booking", or similar failure
 
 Conversation:
 {transcript}"""
@@ -914,7 +942,7 @@ Conversation:
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": extraction_prompt}],
             response_format={"type": "json_object"},
-            max_tokens=350,
+            max_tokens=400,
             temperature=0,
         )
         state = json.loads(resp.choices[0].message.content)
@@ -922,10 +950,103 @@ Conversation:
         print(f"[STATE EXTRACTOR ERROR] {e}", flush=True)
         return ""
 
-    if not state.get("booking_intent") and not any([
+    intent = state.get("intent", "support")
+
+    # ── RESCHEDULE STATE ──────────────────────────────
+    if intent == "reschedule":
+        lines = ["━━━ RESCHEDULE STATE (injected by system — highest priority) ━━━"]
+        lines.append("  ⚠️  RESCHEDULE request — NOT a new booking. Follow RESCHEDULE RULES strictly.")
+        lines.append("  🚫 DO NOT ask for service, issues, or start the new-booking flow.")
+
+        r_email  = state.get("reschedule_email")
+        r_date   = state.get("reschedule_new_date")
+        r_time   = state.get("reschedule_new_time")
+        fb_done  = state.get("find_booking_done", False)
+        fb_failed = state.get("find_booking_failed", False)
+
+        if r_email:
+            lines.append(f"  ✅ 📧 Customer email: {r_email}")
+        if r_date:
+            lines.append(f"  ✅ 📅 Requested new date: {r_date}")
+        if r_time:
+            lines.append(f"  ✅ ⏰ Requested new time: {r_time}")
+        if fb_done:
+            lines.append("  ✅ 🔍 find_booking: already called successfully — event_id is in conversation history")
+        if fb_failed:
+            lines.append("  ⚠️  find_booking: was called but returned no booking for that email")
+
+        if not r_email:
+            next_step = 'Ask: "Could you provide the email address linked to your booking?"'
+        elif fb_failed:
+            next_step = (f'find_booking failed for "{r_email}". '
+                         'Tell the user: "I couldn\'t find a booking for that email. '
+                         'Could you double-check it or try a different one?" '
+                         'Stay in the reschedule flow — do NOT start a new booking.')
+        elif not fb_done:
+            next_step = (f'IMMEDIATELY call find_booking("{r_email}") — '
+                         'do this NOW before writing any response text.')
+        elif r_date and r_time:
+            next_step = (
+                f'find_booking succeeded. Customer already stated new date "{r_date}" and time "{r_time}". '
+                f'Call check_availability for "{r_date}" (convert to YYYY-MM-DD). '
+                'Show slot buttons. Once user confirms, call reschedule_booking(event_id, new_date, new_time).'
+            )
+        elif r_date and not r_time:
+            next_step = (
+                f'find_booking succeeded. Customer already stated new date "{r_date}". '
+                f'Call check_availability for "{r_date}" (convert to YYYY-MM-DD) to show available slots. '
+                'Say "We have availability on [formatted_date]! Please pick a time 👇"'
+            )
+        else:
+            next_step = 'find_booking succeeded. Ask: "What new date would you like to move your appointment to?"'
+
+        lines.append(f"\n  ⏭  NEXT STEP: {next_step}")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        return "\n".join(lines)
+
+    # ── CANCEL STATE ──────────────────────────────────
+    if intent == "cancel":
+        lines = ["━━━ CANCEL STATE (injected by system — highest priority) ━━━"]
+        lines.append("  ⚠️  CANCEL request — NOT a new booking. Follow CANCEL RULES strictly.")
+        lines.append("  🚫 DO NOT ask for service, issues, or start the new-booking flow.")
+
+        c_email  = state.get("reschedule_email")
+        fb_done  = state.get("find_booking_done", False)
+        fb_failed = state.get("find_booking_failed", False)
+
+        if c_email:
+            lines.append(f"  ✅ 📧 Customer email: {c_email}")
+        if fb_done:
+            lines.append("  ✅ 🔍 find_booking: already called successfully — event_id is in conversation history")
+        if fb_failed:
+            lines.append("  ⚠️  find_booking: was called but returned no booking for that email")
+
+        if not c_email:
+            next_step = 'Ask: "Could you provide the email address linked to your booking?"'
+        elif fb_failed:
+            next_step = (f'find_booking failed for "{c_email}". '
+                         'Tell the user: "I couldn\'t find a booking for that email. '
+                         'Could you double-check it or try a different one?" '
+                         'Stay in the cancel flow — do NOT start a new booking.')
+        elif not fb_done:
+            next_step = (f'IMMEDIATELY call find_booking("{c_email}") — '
+                         'do this NOW before writing any response text.')
+        else:
+            next_step = ('find_booking succeeded. Show the booking details and ask: '
+                         '"Shall I go ahead and cancel your [service] on [date] at [time]?" '
+                         'Then call cancel_booking(event_id) after confirmation.')
+
+        lines.append(f"\n  ⏭  NEXT STEP: {next_step}")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        return "\n".join(lines)
+
+    # ── BOOKING STATE (new bookings only) ─────────────
+    booking_active = intent == "new_booking" or any([
         state.get("service"), state.get("issues"), state.get("name"),
         state.get("date"), state.get("time"), state.get("email"),
-    ]):
+    ])
+
+    if not booking_active:
         return ""
 
     issues_list = state.get("issues") or []
@@ -949,11 +1070,7 @@ Conversation:
     if state.get("email"):
         lines.append(f"  ✅ 📧 Email: {state['email']}")
 
-    _booking_active = state.get("booking_intent") or len([
-        f for f in ["service", "date", "time", "name", "phone", "email"] if state.get(f)
-    ]) >= 1 or bool(issues_list)
-
-    if _booking_active:
+    if booking_active:
         if not state.get("service"):
             next_step = 'Ask: "What service do you need?"'
         elif not issues_list:
@@ -992,7 +1109,8 @@ Conversation:
             next_step = 'Ask: "Could you provide your email address?"'
         else:
             next_step = ('Show full confirmation summary — list ALL issues as a numbered list — '
-                         'and ask "Shall I confirm this booking?"')
+                         'and ask "Shall I confirm this booking?" '
+                         'IMPORTANT: Use the EXACT formatted_date from the check_availability tool result for the Date field.')
         lines.append(f"\n  ⏭  NEXT STEP: {next_step}")
         lines.append("  🚫 DO NOT re-ask for any ✅ field above — they are final.")
     else:
@@ -1059,17 +1177,24 @@ async def chat(req: ChatRequest):
         messages, model = build_messages(req)
 
         # ── Detect booking stage ────────────────────────────────────────────
-        # If date is collected but time is not, FORCE check_availability so
-        # slot buttons always appear — never rely on GPT-4o choosing the tool.
+        # If date is collected but time is not (new booking only), FORCE check_availability
+        # so slot buttons always appear — never rely on GPT-4o choosing the tool.
         _state_text = " ".join(
             m["content"] for m in messages
-            if isinstance(m.get("content"), str) and "BOOKING STATE" in m.get("content", "")
+            if isinstance(m.get("content"), str) and any(
+                kw in m.get("content", "")
+                for kw in ("BOOKING STATE", "RESCHEDULE STATE", "CANCEL STATE")
+            )
         )
-        _has_date  = "📅 Date:" in _state_text
-        _has_time  = "⏰ Time:" in _state_text
+        _has_date             = "📅 Date:" in _state_text
+        _has_time             = "⏰ Time:" in _state_text
+        _has_issues_complete  = "Issues finalised: Yes" in _state_text
+        _in_reschedule_cancel = "RESCHEDULE STATE" in _state_text or "CANCEL STATE" in _state_text
+        # Only force check_availability for NEW bookings, after issues are confirmed,
+        # and only when date is known but time is not yet selected.
         _forced_tool_choice = (
             {"type": "function", "function": {"name": "check_availability"}}
-            if _has_date and not _has_time
+            if _has_date and not _has_time and _has_issues_complete and not _in_reschedule_cancel
             else "auto"
         )
 
