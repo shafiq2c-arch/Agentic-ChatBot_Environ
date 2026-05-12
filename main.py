@@ -11,6 +11,7 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from contextlib import asynccontextmanager
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
@@ -221,13 +222,18 @@ app.add_middleware(
 
 
 # ── Google Calendar helpers ────────────────────────
+import httplib2
+
+_GCAL_TIMEOUT = 12  # seconds — prevents hanging if Google API is slow
+
 def get_calendar_service():
     with open(GOOGLE_CREDS_FILE) as f:
         info = json.load(f)
     creds = service_account.Credentials.from_service_account_info(
         info, scopes=["https://www.googleapis.com/auth/calendar"]
     )
-    return build("calendar", "v3", credentials=creds)
+    http = creds.authorize(httplib2.Http(timeout=_GCAL_TIMEOUT))
+    return build("calendar", "v3", http=http)
 
 
 def check_calendar_availability(date_str: str) -> dict:
@@ -576,8 +582,11 @@ def _send_reschedule_email(name: str, old_dt: datetime.datetime, new_dt: datetim
         s.login(gmail_user, gmail_pw); s.sendmail(gmail_user, NOTIFY_EMAIL, msg.as_string())
 
 
+_TOOL_EXECUTOR = ThreadPoolExecutor(max_workers=4)
+_TOOL_TIMEOUT  = 15  # seconds — hard ceiling on any Google Calendar / booking call
+
 def execute_tool(name: str, args: dict) -> dict:
-    try:
+    def _run():
         if name == "check_availability":
             return check_calendar_availability(args["date"])
         if name == "book_appointment":
@@ -589,6 +598,14 @@ def execute_tool(name: str, args: dict) -> dict:
         if name == "reschedule_booking":
             return reschedule_customer_booking(args["event_id"], args["new_date"], args["new_time"])
         return {"error": "Unknown tool"}
+
+    try:
+        future = _TOOL_EXECUTOR.submit(_run)
+        return future.result(timeout=_TOOL_TIMEOUT)
+    except FuturesTimeoutError:
+        print(f"[TOOL TIMEOUT] {name} exceeded {_TOOL_TIMEOUT}s", flush=True)
+        return {"available": False, "slots": [], "success": False,
+                "message": "The calendar service is taking too long to respond. Please try again in a moment."}
     except Exception as e:
         return {"error": str(e), "available": False, "slots": []}
 
