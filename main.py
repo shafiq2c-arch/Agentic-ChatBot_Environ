@@ -107,6 +107,14 @@ STEP 9 — Book: Call book_appointment only AFTER confirmation. Pass ALL issues 
 Cancel: ask email → find_booking → confirm with user → cancel_booking.
 Reschedule: ask email → find_booking → ask new day → check_availability → confirm → reschedule_booking.
 
+RESCHEDULE RULES (follow strictly — no shortcuts):
+1. You MUST call find_booking(email) FIRST before anything else, even if the user gives email + new date in the same message. Never skip this step.
+2. After find_booking succeeds, tell the user: "I found your booking: [service] on [formatted_date] at [formatted_time]. I'll reschedule that for you." Then ask what new day they want (if not already stated).
+3. Store the event_id from find_booking in your working memory — you MUST pass it to reschedule_booking later.
+4. Only after you have event_id AND new_date AND new_time: call check_availability, show slots, get confirmation, then call reschedule_booking(event_id, new_date, new_time).
+5. If the user mentions BOTH a reschedule AND a new booking in the same message: complete the RESCHEDULE FLOW fully first. Only start the new booking flow after reschedule_booking succeeds.
+6. If reschedule_booking returns success:false — tell the user clearly what went wrong (e.g. "That slot is already taken, please pick another time" or "I couldn't find your booking — please double-check the email address"). Do NOT ask for the email again in a loop.
+
 ━━━ DATE RULES ━━━
 - No Sundays. No past dates. Today is {today}.
 - Copy exact "formatted_date" from check_availability result — never recalculate.
@@ -465,11 +473,18 @@ def cancel_customer_booking(event_id: str) -> dict:
 
 
 def reschedule_customer_booking(event_id: str, new_date: str, new_time: str) -> dict:
+    if not event_id or event_id.strip() == "":
+        return {"success": False,
+                "message": "No event_id provided. You must call find_booking first to get the event_id before rescheduling."}
     _prev = _socket.getdefaulttimeout()
     _socket.setdefaulttimeout(_GCAL_TIMEOUT)
     try:
         service   = get_calendar_service()
-        event     = service.events().get(calendarId=CALENDAR_ID, eventId=event_id).execute()
+        try:
+            event = service.events().get(calendarId=CALENDAR_ID, eventId=event_id).execute()
+        except Exception:
+            return {"success": False,
+                    "message": "Could not find the booking to reschedule. Please call find_booking again with the customer's email to get the correct event_id."}
 
         new_dt    = datetime.datetime.strptime(f"{new_date} {new_time}", "%Y-%m-%d %H:%M")
         new_start = LONDON_TZ.localize(new_dt)
