@@ -1115,13 +1115,24 @@ def extract_booking_state(history: list) -> str:
         "that's about it", "just the one issue", "only that one", "only one",
         "just the one", "nothing more to add",
     }
+    # Frustrated / meta-commentary responses that are NOT real issue descriptions
+    _META_COMMENTS = {
+        "its an issue", "it's an issue", "that's the issue", "that is the issue",
+        "its the issue", "it is an issue", "same issue", "same thing", "same problem",
+        "i already said", "i told you", "already told you", "i already told",
+        "as i said", "as i mentioned", "what i said", "i said it",
+        "i just told you", "that's what i said", "i literally just said",
+        "why do you keep asking", "i already mentioned", "see above",
+    }
 
     extra_issues = []
     _issues_complete = False
     _pending_more_issue = False   # user said "yes" to more issues but hasn't described yet
     _other_issues_asked_count = 0
+    # Track whether the primary issue was already captured before multi-issue scan
+    _primary_issue_set = bool(collected.get("issue"))
 
-    # Scan Q&A pairs: when bot asks "any other issues?", capture user's answer
+    # Scan Q&A pairs: when bot asks about issues (initial or follow-up), capture user's answer
     for i in range(len(msgs) - 1):
         role, content = msgs[i]
         next_role, next_val = msgs[i + 1]
@@ -1129,19 +1140,44 @@ def extract_booking_state(history: list) -> str:
             continue
         lc = content.lower()
         nv_lower = next_val.lower().strip()
-        if ("any other issues" in lc or "other issues as well" in lc
-                or "other problems" in lc or "anything else to include" in lc
-                or "anything else i should know" in lc):
+
+        _is_issue_question = (
+            "any other issues" in lc or "other issues as well" in lc
+            or "other issue" in lc or "other problems" in lc
+            or "anything else to include" in lc or "anything else i should know" in lc
+            or "describe that issue" in lc       # follow-up after user said "yes"
+            or "describe the other issue" in lc
+        )
+        if not _is_issue_question:
+            continue
+
+        if not _primary_issue_set:
+            # Bot's first issue question — capture reply as PRIMARY issue, not extra
+            if (nv_lower in _NO_MORE_SET
+                    or any(nv_lower.startswith(p) for p in _NO_MORE_SET)):
+                collected["issue"] = "Will discuss on site"
+                _issues_complete = True
+                _primary_issue_set = True
+            elif nv_lower in CONFIRM_WORDS:
+                _pending_more_issue = True
+            elif (len(next_val.strip()) > 3
+                    and nv_lower not in _META_COMMENTS):
+                collected["issue"] = next_val.strip()
+                _primary_issue_set = True
+            # Do NOT count this as a multi-issue cycle
+        else:
+            # Primary issue already known — normal multi-issue handling
             _other_issues_asked_count += 1
             if (nv_lower in _NO_MORE_SET
                     or any(nv_lower.startswith(p) for p in _NO_MORE_SET)):
                 _issues_complete = True
                 _pending_more_issue = False
             elif nv_lower in CONFIRM_WORDS:
-                # User said "yes/yeah/sure" — they have more but haven't described yet
                 _pending_more_issue = True
-            elif len(next_val.strip()) > 3:
-                # User described the issue directly
+            elif (len(next_val.strip()) > 3
+                    and nv_lower not in _META_COMMENTS
+                    and nv_lower not in {x.lower() for x in extra_issues}
+                    and nv_lower != collected.get("issue", "").lower()):
                 extra_issues.append(next_val.strip())
                 _pending_more_issue = False
 
@@ -1150,27 +1186,36 @@ def extract_booking_state(history: list) -> str:
         _issues_complete = True
         _pending_more_issue = False
 
-    # Scan ALL user messages for follow-up issue trigger phrases
+    # Scan ALL user messages for inline follow-up issue trigger phrases (e.g. "also damp")
     for msg_role, msg_content in msgs:
         if msg_role != "user":
             continue
         if _MORE_ISSUE_RE.search(msg_content):
-            # Strip the trigger phrase and use remaining text as the extra issue
             cleaned = _MORE_ISSUE_RE.sub('', msg_content).strip().strip(',. ')
             if (cleaned and len(cleaned) > 5
                     and cleaned.lower() not in {x.lower() for x in extra_issues}
-                    and cleaned.lower() != collected.get("issue", "").lower()):
+                    and cleaned.lower() != collected.get("issue", "").lower()
+                    and cleaned.lower() not in _META_COMMENTS):
                 extra_issues.append(cleaned)
 
-    # Merge extra issues into collected["issue"] as a combined string
+    # Merge extra issues into collected["issue"] as a combined, deduplicated list
     if extra_issues:
         base = collected.get("issue", "")
         all_issues = []
         if base and base not in ("Will discuss on site",):
             all_issues.append(base)
         for iss in extra_issues:
-            if iss not in all_issues:
-                all_issues.append(iss)
+            all_issues.append(iss)
+
+        # Case-insensitive dedup — keep first occurrence
+        seen_lower = set()
+        deduped = []
+        for iss in all_issues:
+            if iss.lower() not in seen_lower:
+                seen_lower.add(iss.lower())
+                deduped.append(iss)
+        all_issues = deduped
+
         if len(all_issues) > 1:
             numbered = "\n".join(f"{idx+1}. {iss}" for idx, iss in enumerate(all_issues))
             collected["issue"] = numbered
@@ -1240,9 +1285,14 @@ def extract_booking_state(history: list) -> str:
                              '"Please describe that issue briefly." '
                              '— accept the VERY NEXT reply as-is as the issue description.')
             else:
-                next_step = ('Ask: "Are you facing any other issues as well? I can include everything '
-                             'in a single inspection — just let me know! 😊 If not, just say no." '
-                             'Collect more issues if yes; set issues_complete if user says no/done/that\'s all.')
+                issues_so_far = collected.get("issue", "")
+                ack = f' (noted so far: {issues_so_far[:100]})' if issues_so_far else ''
+                next_step = (
+                    f'Issues collected{ack}. '
+                    'Tell the user EXACTLY which issue(s) you have noted (so they know you heard them), '
+                    'then ask: "Are there any other issues I should include? If not, just say no 😊" '
+                    '— if user says no/done/that\'s all → immediately proceed to date step.'
+                )
         elif "date_chosen" not in collected and "time_slot" not in collected:
             next_step = ('All issues collected ✅. Ask: "Which day works for you?" '
                          '— do NOT call check_availability yet, wait for the user to give a date first.')
