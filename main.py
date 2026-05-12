@@ -1312,12 +1312,27 @@ async def chat(req: ChatRequest):
     messages, model = build_messages(req)
 
     def generate():
+        # ── Detect booking stage from injected BOOKING STATE block ──────────
+        # If date is collected but time slot is not, FORCE check_availability
+        # so slot buttons always appear — never rely on GPT-4o choosing the tool.
+        _state_text = " ".join(
+            m["content"] for m in messages
+            if isinstance(m.get("content"), str) and "BOOKING STATE" in m.get("content", "")
+        )
+        _has_date   = "📅 Date:" in _state_text
+        _has_time   = "⏰ Time:" in _state_text
+        _forced_tool_choice = (
+            {"type": "function", "function": {"name": "check_availability"}}
+            if _has_date and not _has_time
+            else "auto"
+        )
+
         # Step 1: non-streaming call (supports tool detection)
         response = openai_client.chat.completions.create(
             model=model,
             messages=messages,
             tools=TOOLS,
-            tool_choice="auto",
+            tool_choice=_forced_tool_choice,
             max_tokens=500,
             temperature=0.4,
         )
