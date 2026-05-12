@@ -222,9 +222,9 @@ app.add_middleware(
 
 
 # ── Google Calendar helpers ────────────────────────
-import httplib2
+import socket as _socket
 
-_GCAL_TIMEOUT = 12  # seconds — prevents hanging if Google API is slow
+_GCAL_TIMEOUT = 10  # seconds — hard socket timeout for all Google API calls
 
 def get_calendar_service():
     with open(GOOGLE_CREDS_FILE) as f:
@@ -232,11 +232,12 @@ def get_calendar_service():
     creds = service_account.Credentials.from_service_account_info(
         info, scopes=["https://www.googleapis.com/auth/calendar"]
     )
-    http = creds.authorize(httplib2.Http(timeout=_GCAL_TIMEOUT))
-    return build("calendar", "v3", http=http)
+    return build("calendar", "v3", credentials=creds)
 
 
 def check_calendar_availability(date_str: str) -> dict:
+    _prev_timeout = _socket.getdefaulttimeout()
+    _socket.setdefaulttimeout(_GCAL_TIMEOUT)
     try:
         dt = datetime.datetime.strptime(date_str, "%Y-%m-%d")
         if dt.weekday() == 6:  # Sunday
@@ -277,7 +278,10 @@ def check_calendar_availability(date_str: str) -> dict:
             "message": "" if free_slots else "No free slots on this date. Please try another day."
         }
     except Exception as e:
+        print(f"[CALENDAR ERROR] check_availability: {e}", flush=True)
         return {"available": False, "slots": [], "message": f"Calendar error: {e}"}
+    finally:
+        _socket.setdefaulttimeout(_prev_timeout)
 
 
 def create_calendar_booking(args: dict) -> dict:
@@ -293,6 +297,8 @@ def create_calendar_booking(args: dict) -> dict:
         return {"success": False, "error": "invalid_phone",
                 "message": "Please provide a valid phone number."}
 
+    _prev_timeout = _socket.getdefaulttimeout()
+    _socket.setdefaulttimeout(_GCAL_TIMEOUT)
     try:
         dt    = datetime.datetime.strptime(f"{args['date']} {args['time']}", "%Y-%m-%d %H:%M")
         start = LONDON_TZ.localize(dt)
@@ -356,6 +362,8 @@ def create_calendar_booking(args: dict) -> dict:
     except Exception as e:
         print(f"[BOOKING ERROR] {e}", flush=True)
         return {"success": False, "error": str(e), "message": f"Booking failed: {e}"}
+    finally:
+        _socket.setdefaulttimeout(_prev_timeout)
 
 
 def _send_email_notification(name: str, phone: str, email: str, dt: datetime.datetime,
