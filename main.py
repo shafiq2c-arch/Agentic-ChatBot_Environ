@@ -1074,6 +1074,8 @@ def build_messages(req: ChatRequest) -> tuple[list, str]:
 # ── Chat endpoint ──────────────────────────────────
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
+    import time as _time
+    _t_start = _time.time()
     # ── Input guardrail ────────────────────────────
     guard = validate_input(req.message)
     if not guard["ok"]:
@@ -1086,9 +1088,13 @@ async def chat(req: ChatRequest):
         return StreamingResponse(_blocked(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache"})
 
+    print(f"[TIMING] validate_input done: +{_time.time()-_t_start:.2f}s", flush=True)
     messages, model = build_messages(req)
+    print(f"[TIMING] build_messages done (incl. extract_booking_state): +{_time.time()-_t_start:.2f}s", flush=True)
 
     def generate():
+        import time as _time2
+        _tg = _time2.time()
         # ── Detect booking stage from injected BOOKING STATE block ──────────
         # If date is collected but time slot is not, FORCE check_availability
         # so slot buttons always appear — never rely on GPT-4o choosing the tool.
@@ -1103,8 +1109,10 @@ async def chat(req: ChatRequest):
             if _has_date and not _has_time
             else "auto"
         )
+        print(f"[TIMING] generate() setup done, forced={_has_date and not _has_time}: +{_time2.time()-_tg:.2f}s", flush=True)
 
         # Step 1: non-streaming call (supports tool detection)
+        print(f"[TIMING] calling OpenAI #1 (gpt-4o, tool_choice={_forced_tool_choice})...", flush=True)
         response = openai_client.chat.completions.create(
             model=model,
             messages=messages,
@@ -1114,6 +1122,7 @@ async def chat(req: ChatRequest):
             temperature=0.4,
         )
         choice = response.choices[0]
+        print(f"[TIMING] OpenAI #1 done, finish_reason={choice.finish_reason}: +{_time2.time()-_tg:.2f}s", flush=True)
 
         if choice.finish_reason == "tool_calls":
             # Step 2: execute every tool call
@@ -1123,7 +1132,9 @@ async def chat(req: ChatRequest):
 
             for tc in msg.tool_calls:
                 args   = json.loads(tc.function.arguments)
+                print(f"[TIMING] execute_tool({tc.function.name}) start: +{_time2.time()-_tg:.2f}s", flush=True)
                 result = execute_tool(tc.function.name, args)
+                print(f"[TIMING] execute_tool({tc.function.name}) done: +{_time2.time()-_tg:.2f}s", flush=True)
 
                 # Queue a slot-picker UI event for the frontend
                 if tc.function.name == "check_availability" and result.get("slots"):
@@ -1169,6 +1180,7 @@ async def chat(req: ChatRequest):
             ] + tool_results
 
             # Step 3: buffer streaming response then apply output guardrail
+            print(f"[TIMING] calling OpenAI #2 (follow-up stream)...", flush=True)
             stream = openai_client.chat.completions.create(
                 model=model,
                 messages=follow_up,
@@ -1181,6 +1193,7 @@ async def chat(req: ChatRequest):
                 delta = chunk.choices[0].delta.content
                 if delta:
                     raw_text += delta
+            print(f"[TIMING] OpenAI #2 done: +{_time2.time()-_tg:.2f}s", flush=True)
             safe_text = validate_output(raw_text)
             words = safe_text.split(" ")
             for i, w in enumerate(words):
