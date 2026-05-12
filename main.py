@@ -847,470 +847,140 @@ def parse_time_to_hhmm(text: str):
 
 def extract_booking_state(history: list) -> str:
     """
-    Scan conversation history, extract collected booking fields, determine
-    the next required step, and return a structured state block to inject
-    as a high-priority system message immediately before the user's message.
+    AI-powered booking state extractor.
+    Uses GPT-4o-mini to read the conversation and return a clean JSON state,
+    then formats it into a structured block injected into the main prompt.
+    Replaces the old 500-line regex machine — robust to any phrasing.
     """
-    collected = {}
-    msgs = [(m.role, m.content.strip()) for m in history]
-
-    for i in range(len(msgs) - 1):
-        role, content = msgs[i]
-        if role != "assistant":
-            continue
-        next_role, next_val = msgs[i + 1]
-        if next_role != "user" or not next_val or len(next_val) > 300:
-            continue
-
-        lc = content.lower()
-
-        # Service
-        if ("which service" in lc or "what service" in lc or "what service do you need" in lc):
-            if len(next_val.split()) <= 8 and next_val.lower().strip() not in CONFIRM_WORDS:
-                collected["service"] = next_val
-
-        # Issue — accept ANY answer after asking for description.
-        # If user skips / refuses, store a placeholder so we never ask again.
-        SKIP_WORDS = {"no","nope","skip","pass","later","idk","don't know","not sure",
-                      "n/a","na","nothing","private","rather not","prefer not","no thanks",
-                      "i'll tell you","tell you later","tell you when","explain later"}
-        if ("describe the issue" in lc or "briefly describe" in lc or
-                "what issue" in lc or "what's the issue" in lc or "facing with" in lc):
-            if next_val.lower().strip() not in CONFIRM_WORDS:
-                nv_lower = next_val.lower().strip()
-                # Negative / skip response → use placeholder
-                if any(nv_lower == s or nv_lower.startswith(s) for s in SKIP_WORDS):
-                    collected["issue"] = "Will discuss on site"
-                else:
-                    collected["issue"] = next_val
-
-        # Name — 1-4 words, no digits, no @
-        if ("your name" in lc or "full name" in lc or "provide your name" in lc) and "last name" not in lc:
-            words = next_val.split()
-            if ("@" not in next_val and 1 <= len(words) <= 4
-                    and not any(c.isdigit() for c in next_val)):
-                collected["name"] = next_val
-
-        # Last name — append
-        if "last name" in lc:
-            if "@" not in next_val and not any(c.isdigit() for c in next_val):
-                first = collected.get("name", "")
-                if first and next_val.lower() not in first.lower():
-                    collected["name"] = f"{first} {next_val}".strip()
-                elif not first:
-                    collected["name"] = next_val
-
-        # Phone — ≥7 digits, digits ≥50% of string
-        if ("phone" in lc or "mobile" in lc or "contact number" in lc) and "email" not in lc:
-            digits_only = re.sub(r"\D", "", next_val)
-            if (len(digits_only) >= 7
-                    and len(digits_only) / max(len(next_val), 1) >= 0.5
-                    and len(next_val) <= 20):
-                collected["phone"] = next_val
-
-        # Email
-        if "email" in lc and "@" in next_val:
-            collected["email"] = next_val
-
-        # Date chosen
-        if ("which day" in lc or "what day" in lc or "what date" in lc or "when would" in lc):
-            if len(next_val) <= 50 and next_val.lower().strip() not in CONFIRM_WORDS:
-                collected["date_chosen"] = next_val
-
-        # Time slot — exact HH:MM or natural language (2pm, 9am, etc.)
-        # Only capture when bot's message was about picking a time
-        if ("pick a time" in lc or "please pick" in lc or "which time" in lc
-                or re.match(r"^\d{1,2}:\d{2}$", next_val.strip())):
-            parsed = parse_time_to_hhmm(next_val)
-            if parsed:
-                collected["time_slot"] = parsed
-
-    # ── FALLBACK: auto-populate issue from photo ──
-    # If the user shared a photo and the bot analysed it, use the bot's analysis
-    # as the issue — never ask "describe your issue" again when a photo was sent.
-    if "issue" not in collected:
-        _DAMAGE_WORDS = {
-            "mould", "mold", "damp", "rot", "leak", "crack", "stain",
-            "condensation", "penetrating", "rising", "water", "peeling",
-            "discolouration", "discoloration", "patch", "patches", "black spot",
-            "fungal", "structural", "subsidence", "pest", "damp patch",
-        }
-        for i, (role, content) in enumerate(msgs):
-            if role != "user" or "[photo attached]" not in content.lower():
-                continue
-            # Find the bot's next response to this image message
-            for j in range(i + 1, len(msgs)):
-                bot_role, bot_content = msgs[j]
-                if bot_role != "assistant":
-                    continue
-                bot_lc = bot_content.lower()
-                if any(w in bot_lc for w in _DAMAGE_WORDS):
-                    # Extract first meaningful sentence as issue summary
-                    sentences = [s.strip() for s in re.split(r'[.!?]', bot_content) if len(s.strip()) > 20]
-                    summary = sentences[0][:150] if sentences else "Property issue shown in photo"
-                    collected["issue"] = f"Photo submitted — {summary}"
-                else:
-                    collected["issue"] = "Property issue shown in submitted photo"
-                break
-            if "issue" in collected:
-                break
-
-    # ── FALLBACK: extract service from any user message ──
-    # Handles the case where user mentions service upfront (e.g. "I want to book a damp survey")
-    # without the bot ever asking "What service do you need?"
-    SERVICE_KEYWORDS = [
-        "damp survey", "damp proofing", "damp inspection", "damp treatment", "damp check",
-        "mould removal", "mould treatment", "mould survey", "mold removal", "mold treatment",
-        "dry rot", "wet rot", "rot treatment", "rot survey",
-        "repointing", "brick cleaning", "pointing",
-        "roofing", "roof repair", "roof inspection", "roof survey",
-        "drainage", "drain survey", "drain inspection",
-        "sash window", "window repair", "window survey",
-        "pest control", "pest inspection",
-        "waterproofing", "basement conversion",
-        "condensation survey", "condensation control", "condensation treatment",
-        "rising damp", "penetrating damp", "lateral damp",
-        "piv unit", "piv installation", "piv ventilation",
-        "property inspection", "property survey", "free inspection", "free survey",
-        "mould remediation", "damp proofing", "structural repair", "structural restoration",
-    ]
-    if "service" not in collected:
-        for msg_role, msg_content in msgs:
-            if msg_role != "user":
-                continue
-            content_lower = msg_content.lower()
-            for kw in SERVICE_KEYWORDS:
-                if kw in content_lower:
-                    collected["service"] = kw.title()
-                    break
-            if "service" in collected:
-                break
-
-    # ── FALLBACK: service confirmed from bot recommendation ──
-    # Critical case: bot recommends a service ("the best service would be X"),
-    # user confirms ("yes", "go ahead", "go ahead with this service", etc.)
-    # → capture the service name from the bot's message.
-    if "service" not in collected:
-        _CONFIRM_BOT_SVC = CONFIRM_WORDS | {
-            "go ahead", "go ahead with this", "go ahead with this service",
-            "go ahead with that service", "proceed with this", "proceed with that",
-            "that service", "this service", "that one", "this one",
-            "yes please", "sounds good", "great", "perfect", "that works",
-            "sounds great", "let's do it", "lets do it", "do that",
-        }
-        for i in range(len(msgs) - 1):
-            role, content = msgs[i]
-            next_role, next_val = msgs[i + 1]
-            if role != "assistant" or next_role != "user":
-                continue
-            nv_s = next_val.lower().strip()
-            is_confirm = (nv_s in _CONFIRM_BOT_SVC
-                          or any(nv_s.startswith(c + " ") for c in _CONFIRM_BOT_SVC)
-                          or any(nv_s == c for c in _CONFIRM_BOT_SVC))
-            if not is_confirm:
-                continue
-            # Search the bot's message for any known service keyword
-            content_lower = content.lower()
-            for kw in SERVICE_KEYWORDS:
-                if kw in content_lower:
-                    collected["service"] = kw.title()
-                    break
-            if "service" in collected:
-                break
-
-    # ── FALLBACK: extract time slot from user message after a time-picker prompt ──
-    # Handles "11:00" button clicks AND natural language like "2pm", "9 am"
-    if "time_slot" not in collected:
-        for i in range(len(msgs) - 1):
-            role, content = msgs[i]
-            if role != "assistant":
-                continue
-            lc2 = content.lower()
-            if "pick a time" in lc2 or "please pick" in lc2 or "we have availability on" in lc2:
-                next_role2, next_val2 = msgs[i + 1]
-                if next_role2 == "user":
-                    parsed = parse_time_to_hhmm(next_val2)
-                    if parsed:
-                        collected["time_slot"] = parsed
-                        break
-
-    # ── FALLBACK: extract date from any user message ──
-    # Handles date button clicks like "Monday, 11 May 2026"
-    if "date_chosen" not in collected:
-        DATE_PATTERN = re.compile(
-            r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday)"
-            r"[,\s]+\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\S*\s+\d{4}\b",
-            re.IGNORECASE
-        )
-        for msg_role, msg_content in msgs:
-            if msg_role == "user" and DATE_PATTERN.search(msg_content):
-                collected["date_chosen"] = msg_content.strip()
-                break
-
-    # ── FALLBACK: extract name from any user message ──
-    # Handles "my name is David Clarke", "I'm David Clarke", name given upfront
-    if "name" not in collected:
-        NAME_PATTERNS = [
-            re.compile(r"\bmy name(?:\s+is)?\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,3})\b", re.IGNORECASE),
-            re.compile(r"\bcall me\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,2})\b", re.IGNORECASE),
-            re.compile(r"\bname[:\s]+([A-Za-z]+(?:\s+[A-Za-z]+){0,3})\b", re.IGNORECASE),
-        ]
-        for msg_role, msg_content in msgs:
-            if msg_role != "user":
-                continue
-            for pat in NAME_PATTERNS:
-                nm = pat.search(msg_content)
-                if nm:
-                    candidate = nm.group(1).strip()
-                    words = candidate.split()
-                    if (2 <= len(words) <= 4 and "@" not in candidate
-                            and not any(c.isdigit() for c in candidate)):
-                        collected["name"] = candidate
-                        break
-            if "name" in collected:
-                break
-
-    # ── FALLBACK: extract phone from any user message ──
-    # Handles "phone 07712345678", "call me on 07712 345 678", etc.
-    if "phone" not in collected:
-        PHONE_PATTERN = re.compile(r"\b((?:\+44\s*|0)[\d\s\-]{9,14})\b")
-        for msg_role, msg_content in msgs:
-            if msg_role != "user":
-                continue
-            pm = PHONE_PATTERN.search(msg_content)
-            if pm:
-                phone_raw = pm.group(1)
-                digits_only = re.sub(r"\D", "", phone_raw)
-                if len(digits_only) >= 7:
-                    collected["phone"] = phone_raw.strip()
-                    break
-
-    # ── FALLBACK: extract email from any user message ──
-    # Handles "email david.clarke@hotmail.com", address given upfront
-    if "email" not in collected:
-        EMAIL_PATTERN = re.compile(r"\b[\w.+\-]+@[\w.\-]+\.[a-z]{2,}\b", re.IGNORECASE)
-        for msg_role, msg_content in msgs:
-            if msg_role != "user":
-                continue
-            em = EMAIL_PATTERN.search(msg_content)
-            if em:
-                collected["email"] = em.group(0)
-                break
-
-    # ── MULTI-ISSUE ACCUMULATION ──
-    # Collect all issues mentioned across the conversation; detect "no more" gate.
-    _MORE_ISSUE_RE = re.compile(
-        r'\b(?:also|another issue|one more(?:\s+thing)?|and\s+(?:also|another)|'
-        r'plus|as well|additionally|same problem|there\'?s also|'
-        r'furthermore|in addition|on top of that|i also have|i also got|'
-        r'there\'?s another|another thing|and\s+there\'?s|i have another)\b',
-        re.IGNORECASE
-    )
-    _NO_MORE_SET = {
-        "no", "nope", "no more", "that's all", "that is all", "nothing else",
-        "just those", "just that", "no other", "nothing more", "those are all",
-        "that's it", "thats it", "that's everything", "done", "no other issues",
-        "no more issues", "that covers it", "just these issues", "just this one",
-        "that should be it", "no nothing else", "none", "no that's all",
-        "that's about it", "just the one issue", "only that one", "only one",
-        "just the one", "nothing more to add",
-    }
-    # Frustrated / meta-commentary responses that are NOT real issue descriptions
-    _META_COMMENTS = {
-        "its an issue", "it's an issue", "that's the issue", "that is the issue",
-        "its the issue", "it is an issue", "same issue", "same thing", "same problem",
-        "i already said", "i told you", "already told you", "i already told",
-        "as i said", "as i mentioned", "what i said", "i said it",
-        "i just told you", "that's what i said", "i literally just said",
-        "why do you keep asking", "i already mentioned", "see above",
-    }
-
-    extra_issues = []
-    _issues_complete = False
-    _pending_more_issue = False   # user said "yes" to more issues but hasn't described yet
-    _other_issues_asked_count = 0
-    # Track whether the primary issue was already captured before multi-issue scan
-    _primary_issue_set = bool(collected.get("issue"))
-
-    # Scan Q&A pairs: when bot asks about issues (initial or follow-up), capture user's answer
-    for i in range(len(msgs) - 1):
-        role, content = msgs[i]
-        next_role, next_val = msgs[i + 1]
-        if role != "assistant" or next_role != "user":
-            continue
-        lc = content.lower()
-        nv_lower = next_val.lower().strip()
-
-        _is_issue_question = (
-            "any other issues" in lc or "other issues as well" in lc
-            or "other issue" in lc or "other problems" in lc
-            or "anything else to include" in lc or "anything else i should know" in lc
-            or "describe that issue" in lc       # follow-up after user said "yes"
-            or "describe the other issue" in lc
-        )
-        if not _is_issue_question:
-            continue
-
-        if not _primary_issue_set:
-            # Bot's first issue question — capture reply as PRIMARY issue, not extra
-            if (nv_lower in _NO_MORE_SET
-                    or any(nv_lower.startswith(p) for p in _NO_MORE_SET)):
-                collected["issue"] = "Will discuss on site"
-                _issues_complete = True
-                _primary_issue_set = True
-            elif nv_lower in CONFIRM_WORDS:
-                _pending_more_issue = True
-            elif (len(next_val.strip()) > 3
-                    and nv_lower not in _META_COMMENTS):
-                collected["issue"] = next_val.strip()
-                _primary_issue_set = True
-            # Do NOT count this as a multi-issue cycle
-        else:
-            # Primary issue already known — normal multi-issue handling
-            _other_issues_asked_count += 1
-            if (nv_lower in _NO_MORE_SET
-                    or any(nv_lower.startswith(p) for p in _NO_MORE_SET)):
-                _issues_complete = True
-                _pending_more_issue = False
-            elif nv_lower in CONFIRM_WORDS:
-                _pending_more_issue = True
-            elif (len(next_val.strip()) > 3
-                    and nv_lower not in _META_COMMENTS
-                    and nv_lower not in {x.lower() for x in extra_issues}
-                    and nv_lower != collected.get("issue", "").lower()):
-                extra_issues.append(next_val.strip())
-                _pending_more_issue = False
-
-    # Auto-complete: if we've looped 3+ times without resolution, break the cycle
-    if _other_issues_asked_count >= 3 and not _issues_complete:
-        _issues_complete = True
-        _pending_more_issue = False
-
-    # Scan ALL user messages for inline follow-up issue trigger phrases (e.g. "also damp")
-    for msg_role, msg_content in msgs:
-        if msg_role != "user":
-            continue
-        if _MORE_ISSUE_RE.search(msg_content):
-            cleaned = _MORE_ISSUE_RE.sub('', msg_content).strip().strip(',. ')
-            if (cleaned and len(cleaned) > 5
-                    and cleaned.lower() not in {x.lower() for x in extra_issues}
-                    and cleaned.lower() != collected.get("issue", "").lower()
-                    and cleaned.lower() not in _META_COMMENTS):
-                extra_issues.append(cleaned)
-
-    # Merge extra issues into collected["issue"] as a combined, deduplicated list
-    if extra_issues:
-        base = collected.get("issue", "")
-        all_issues = []
-        if base and base not in ("Will discuss on site",):
-            all_issues.append(base)
-        for iss in extra_issues:
-            all_issues.append(iss)
-
-        # Case-insensitive dedup — keep first occurrence
-        seen_lower = set()
-        deduped = []
-        for iss in all_issues:
-            if iss.lower() not in seen_lower:
-                seen_lower.add(iss.lower())
-                deduped.append(iss)
-        all_issues = deduped
-
-        if len(all_issues) > 1:
-            numbered = "\n".join(f"{idx+1}. {iss}" for idx, iss in enumerate(all_issues))
-            collected["issue"] = numbered
-        elif all_issues:
-            collected["issue"] = all_issues[0]
-
-    # Set issues_complete flag
-    if _issues_complete:
-        collected["issues_complete"] = True
-    # Auto-complete: user skipped issue entirely OR date is already chosen (past that stage)
-    elif collected.get("issue") == "Will discuss on site":
-        collected["issues_complete"] = True
-    elif "date_chosen" in collected or "time_slot" in collected:
-        collected["issues_complete"] = True
-    # Auto-complete: issue came from a photo (already known)
-    elif "issue" in collected and collected["issue"].startswith("Photo submitted"):
-        collected["issues_complete"] = True
-
-    if not collected:
+    if not history or not openai_client:
         return ""
 
-    # ── Only push booking NEXT STEP when genuinely in booking mode ──
-    # Suppress NEXT STEP if only a service keyword was passively detected
-    # from an info question (e.g. "what causes rising damp?").
-    BOOKING_INTENT_KEYWORDS = [
-        "book", "appointment", "schedule", "inspection", "come out",
-        "send someone", "arrange", "fix a time", "set up", "available",
-        "free inspection", "free survey", "make a booking", "want to book",
-        "like to book", "need to book", "can you come", "when can you",
-    ]
-    _all_user_text = " ".join(c.lower() for r, c in msgs if r == "user")
-    _booking_intent = any(kw in _all_user_text for kw in BOOKING_INTENT_KEYWORDS)
-    _mid_flow = len(collected) >= 2   # 2+ fields means we're actively booking
+    today = datetime.date.today().strftime("%A, %d %B %Y")
+
+    # Build compact transcript (last 30 messages)
+    transcript_lines = []
+    for m in history[-30:]:
+        role_label = "Customer" if m.role == "user" else "Agent"
+        text = m.content.strip()[:400]
+        transcript_lines.append(f"{role_label}: {text}")
+    transcript = "\n".join(transcript_lines)
+
+    extraction_prompt = f"""You are a booking state extractor for a property inspection chatbot.
+Read the conversation below and extract ONLY what has been explicitly provided or clearly confirmed.
+Be conservative — when uncertain, use null. Today is {today}.
+
+Return ONLY a valid JSON object with these fields:
+{{
+  "booking_intent": true or false,
+  "service": "service name or null",
+  "issues": ["list of distinct property issues mentioned — deduplicated, no meta-comments like 'its an issue' or 'same thing'"],
+  "issues_complete": true or false,
+  "pending_more_issue": true or false,
+  "date": "date as the customer said it, or null",
+  "time": "HH:MM 24h format or null",
+  "name": "full name or null",
+  "phone": "phone number or null",
+  "email": "email address or null"
+}}
+
+Field rules:
+- booking_intent: true if customer expressed intent to book/schedule/arrange an inspection
+- service: extract from customer message OR from agent recommendation the customer accepted
+- issues: list every distinct property issue the customer mentioned. Deduplicate. Ignore frustrated meta-replies like "its an issue", "i already said", "same thing", "that's the issue"
+- issues_complete: true ONLY if customer explicitly said no more issues ("no", "nope", "that's all", "nothing else", "done", "just that one") OR if date/time are already chosen (past that stage)
+- pending_more_issue: true if the LAST exchange was agent asking "any other issues?" and customer replied "yes/yeah/sure" WITHOUT describing a new issue
+- date: only if customer gave a specific date (e.g. "Monday 19 May 2026") or clicked a date button
+- time: only if customer selected a specific time slot or typed a time — convert to HH:MM 24h
+- name/phone/email: only if customer explicitly provided these
+
+Conversation:
+{transcript}"""
+
+    try:
+        resp = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": extraction_prompt}],
+            response_format={"type": "json_object"},
+            max_tokens=350,
+            temperature=0,
+        )
+        state = json.loads(resp.choices[0].message.content)
+    except Exception as e:
+        print(f"[STATE EXTRACTOR ERROR] {e}", flush=True)
+        return ""
+
+    # ── Nothing collected yet → no state block needed ──
+    if not state.get("booking_intent") and not any([
+        state.get("service"), state.get("issues"), state.get("name"),
+        state.get("date"), state.get("time"), state.get("email"),
+    ]):
+        return ""
+
+    issues_list = state.get("issues") or []
+    issues_text = "\n".join(f"    {i+1}. {iss}" for i, iss in enumerate(issues_list))
 
     # ── Build structured state block ──────────────────
-    label_map = {
-        "service":         "🔧 Service",
-        "issue":           "⚠️  Issues",
-        "issues_complete": "✔️  Issues finalised",
-        "date_chosen":     "📅 Date",
-        "time_slot":       "⏰ Time",
-        "name":            "👤 Name",
-        "phone":           "📱 Phone",
-        "email":           "📧 Email",
-    }
-    ORDERED = ["service", "issue", "issues_complete", "date_chosen", "time_slot", "name", "phone", "email"]
-
     lines = ["━━━ BOOKING STATE (injected by system — highest priority) ━━━"]
-    for key in ORDERED:
-        if key in collected:
-            val = collected[key]
-            if key == "issues_complete":
-                lines.append(f"  ✅ {label_map[key]}: Yes — proceed to date")
-            else:
-                lines.append(f"  ✅ {label_map[key]}: {val}")
 
-    # Determine exactly what to do next — only push booking steps when in booking mode
-    if _booking_intent or _mid_flow:
-        if "service" not in collected:
+    if state.get("service"):
+        lines.append(f"  ✅ 🔧 Service: {state['service']}")
+    if issues_list:
+        lines.append(f"  ✅ ⚠️  Issues:\n{issues_text}")
+    if state.get("issues_complete"):
+        lines.append("  ✅ ✔️  Issues finalised: Yes — proceed to date")
+    if state.get("date"):
+        lines.append(f"  ✅ 📅 Date: {state['date']}")
+    if state.get("time"):
+        lines.append(f"  ✅ ⏰ Time: {state['time']}")
+    if state.get("name"):
+        lines.append(f"  ✅ 👤 Name: {state['name']}")
+    if state.get("phone"):
+        lines.append(f"  ✅ 📱 Phone: {state['phone']}")
+    if state.get("email"):
+        lines.append(f"  ✅ 📧 Email: {state['email']}")
+
+    # ── Determine NEXT STEP ────────────────────────────
+    _booking_active = state.get("booking_intent") or len([
+        f for f in ["service", "date", "time", "name", "phone", "email"]
+        if state.get(f)
+    ]) >= 1 or bool(issues_list)
+
+    if _booking_active:
+        if not state.get("service"):
             next_step = 'Ask: "What service do you need?"'
-        elif "issue" not in collected:
-            next_step = ('Ask: "Could you describe the issue(s) you are facing?" — '
-                         'accept the VERY NEXT reply as-is. Then ask about other issues.')
-        elif "issues_complete" not in collected:
-            if _pending_more_issue:
-                next_step = ('User confirmed they have another issue. Ask: '
+        elif not issues_list:
+            next_step = ('Ask: "Could you describe the issue(s) you are facing?" '
+                         '— accept the VERY NEXT reply as-is.')
+        elif not state.get("issues_complete"):
+            if state.get("pending_more_issue"):
+                next_step = ('User said yes to having more issues. Ask: '
                              '"Please describe that issue briefly." '
-                             '— accept the VERY NEXT reply as-is as the issue description.')
+                             '— accept the VERY NEXT reply as the issue description.')
             else:
-                issues_so_far = collected.get("issue", "")
-                ack = f' (noted so far: {issues_so_far[:100]})' if issues_so_far else ''
+                noted = issues_text.strip()
                 next_step = (
-                    f'Issues collected{ack}. '
-                    'Tell the user EXACTLY which issue(s) you have noted (so they know you heard them), '
+                    f'Issues noted:\n{noted}\n'
+                    'Confirm to the user which issue(s) you have noted (so they know you heard them), '
                     'then ask: "Are there any other issues I should include? If not, just say no 😊" '
-                    '— if user says no/done/that\'s all → immediately proceed to date step.'
+                    '— if user says no/done/that\'s all → immediately move to date step.'
                 )
-        elif "date_chosen" not in collected and "time_slot" not in collected:
+        elif not state.get("date") and not state.get("time"):
             next_step = ('All issues collected ✅. Ask: "Which day works for you?" '
                          '— do NOT call check_availability yet, wait for the user to give a date first.')
-        elif "time_slot" not in collected:
-            date_ref = collected.get("date_chosen", "the chosen date")
+        elif not state.get("time"):
+            date_ref = state.get("date", "the chosen date")
             next_step = (
                 f'MUST call check_availability for "{date_ref}" (convert to YYYY-MM-DD). '
                 'This is mandatory — it sends the slot buttons to the frontend. '
                 'After the tool returns, say ONLY: '
                 '"We have availability on [formatted_date]! Please pick a time 👇" '
-                '— do NOT list times as text, do NOT skip the tool call, '
-                'even if the user asked an unrelated question.'
+                '— do NOT list times as text, do NOT skip the tool call.'
             )
-        elif "name" not in collected:
+        elif not state.get("name"):
             next_step = 'Ask: "Could you provide your full name?"'
-        elif "phone" not in collected:
+        elif not state.get("phone"):
             next_step = 'Ask: "Could you provide your phone number?"'
-        elif "email" not in collected:
+        elif not state.get("email"):
             next_step = 'Ask: "Could you provide your email address?"'
         else:
             next_step = ('Show full confirmation summary — list ALL issues as a numbered list — '
@@ -1319,7 +989,6 @@ def extract_booking_state(history: list) -> str:
         lines.append("  🚫 DO NOT re-ask for any ✅ field above — they are final.")
     else:
         lines.append("\n  ℹ️  User is in support/info mode — answer their question freely.")
-        lines.append("  🚫 DO NOT re-ask for any ✅ field above — they are final.")
 
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     return "\n".join(lines)
