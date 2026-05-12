@@ -66,8 +66,8 @@ STEP 2 — Issues (multi-issue collection):
   • NEVER start a new booking for each individual issue — ALL issues go into ONE single booking.
   • Once all issues are collected and confirmed, proceed to STEP 3.
 
-STEP 3 — Date: Say "Which day works for you?" then call check_availability.
-STEP 4 — Time: Say ONLY "We have availability on [formatted_date]! Please pick a time 👇" — buttons appear automatically, do NOT list times as text.
+STEP 3 — Date: Ask "Which day works for you?" — do NOT call check_availability yet. Wait for the user to reply with a date first.
+STEP 4 — Time: Call check_availability for the date the user gave (this sends slot buttons to the frontend). Then say ONLY "We have availability on [formatted_date]! Please pick a time 👇" — do NOT list times as text.
 STEP 5 — Name: Ask "Could you provide your full name?"
 STEP 6 — Phone: Ask "Could you provide your phone number?"
 STEP 7 — Email: Ask "Could you provide your email address?"
@@ -1225,7 +1225,8 @@ def extract_booking_state(history: list) -> str:
                          'in a single inspection — just let me know! 😊 If not, just say no." '
                          'Collect more issues if yes; set issues_complete if user says no/done/that\'s all.')
         elif "date_chosen" not in collected and "time_slot" not in collected:
-            next_step = 'All issues collected ✅. Ask which day works and call check_availability.'
+            next_step = ('All issues collected ✅. Ask: "Which day works for you?" '
+                         '— do NOT call check_availability yet, wait for the user to give a date first.')
         elif "time_slot" not in collected:
             date_ref = collected.get("date_chosen", "the chosen date")
             next_step = (
@@ -1397,6 +1398,17 @@ async def chat(req: ChatRequest):
             for evt in ui_events:
                 yield f"data: {json.dumps(evt)}\n\n"
 
+            # Emit datepicker event if bot is asking for a date (and no slot UI already queued)
+            _DATE_ASK_TRIGGERS = [
+                'which day', 'what day', 'when would', 'day works', 'day suits',
+                'preferred date', 'preferred day', 'works for you', 'what date',
+                'which date', 'choose a date', 'pick a date', 'when suits',
+                'what day works', 'what day suits', 'pick a day',
+            ]
+            _has_slot_ui = any(e.get("ui") == "slots" for e in ui_events)
+            if not _has_slot_ui and any(t in safe_text.lower() for t in _DATE_ASK_TRIGGERS):
+                yield f"data: {json.dumps({'ui': 'datepicker'})}\n\n"
+
         else:
             # No tool call — apply output guardrail then stream word-by-word
             content = validate_output(choice.message.content or "")
@@ -1404,6 +1416,16 @@ async def chat(req: ChatRequest):
             for i, word in enumerate(words):
                 token = word + (" " if i < len(words) - 1 else "")
                 yield f"data: {json.dumps({'token': token})}\n\n"
+
+            # Emit datepicker event if bot is asking for a date
+            _DATE_ASK_TRIGGERS = [
+                'which day', 'what day', 'when would', 'day works', 'day suits',
+                'preferred date', 'preferred day', 'works for you', 'what date',
+                'which date', 'choose a date', 'pick a date', 'when suits',
+                'what day works', 'what day suits', 'pick a day',
+            ]
+            if any(t in content.lower() for t in _DATE_ASK_TRIGGERS):
+                yield f"data: {json.dumps({'ui': 'datepicker'})}\n\n"
 
         yield "data: [DONE]\n\n"
 

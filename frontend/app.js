@@ -383,6 +383,9 @@ async function sendMessage() {
   const message = input.value.trim();
   if (!message && !selectedImage) return;
 
+  // Clear any lingering pickers before sending
+  removePickers();
+
   const sendBtn = document.getElementById('sendBtn');
   sendBtn.disabled = true;
 
@@ -448,6 +451,7 @@ async function sendMessage() {
           const parsed = JSON.parse(payload);
           if (parsed.error) throw new Error(parsed.error);
           if (parsed.ui === 'slots') { showSlotPicker(parsed.slots); continue; }
+          if (parsed.ui === 'datepicker') { showDatePicker(); continue; }
           if (parsed.token) {
             fullText += parsed.token;
             bubble.innerHTML = renderMarkdown(fullText) + '<span class="cursor-blink">▍</span>';
@@ -462,10 +466,15 @@ async function sendMessage() {
     // Finalise bubble
     bubble.innerHTML = renderMarkdown(fullText);
 
-    // Show date picker if bot asks for a day
+    // Show date picker if bot asks for a day (fallback — backend SSE is primary trigger)
     const DATE_TRIGGERS = ['which day','what day','when would you','day works','day suits',
                            'prefer a day','choose a day','pick a day','what date','which date'];
-    if (DATE_TRIGGERS.some(t => fullText.toLowerCase().includes(t))) showDatePicker();
+    const isBookingQuestion = fullText.toLowerCase().includes('book') ||
+      fullText.toLowerCase().includes('appointment') || fullText.toLowerCase().includes('inspection') ||
+      fullText.toLowerCase().includes('schedule') || fullText.toLowerCase().includes('visit') ||
+      fullText.toLowerCase().includes('survey') || fullText.toLowerCase().includes('come out') ||
+      fullText.toLowerCase().includes('works for you') || fullText.toLowerCase().includes('day suits');
+    if (isBookingQuestion && DATE_TRIGGERS.some(t => fullText.toLowerCase().includes(t))) showDatePicker();
 
     // Booking confirmed — remove pickers, mark done
     if (fullText.includes("You're booked") || fullText.includes("you're booked") || fullText.includes('✅')) {
