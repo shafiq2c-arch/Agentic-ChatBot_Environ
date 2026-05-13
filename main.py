@@ -973,7 +973,7 @@ Conversation:
 
     try:
         resp = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4.1-mini",
             messages=[{"role": "user", "content": extraction_prompt}],
             response_format={"type": "json_object"},
             max_tokens=400,
@@ -1244,7 +1244,7 @@ def build_messages(req: ChatRequest) -> tuple[list, str]:
         user_content = user_text
 
     messages.append({"role": "user", "content": user_content})
-    return messages, "gpt-4o"
+    return messages, "gpt-4.1"
 
 
 # ── Chat endpoint ──────────────────────────────────
