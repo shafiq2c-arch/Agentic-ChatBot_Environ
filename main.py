@@ -954,18 +954,10 @@ Field rules:
 - service: extract from customer message OR from agent recommendation the customer accepted — for NEW bookings only
 - issues: every distinct property issue the customer mentioned. Deduplicate. Ignore meta-replies like "its an issue" or "a problem". Include issues from ANY message including the first one. If the customer described an issue AND immediately confirmed no more ("I have damp, that's it" / "just mould, nothing else"), include the issue AND set issues_complete to true in the same turn.
 - issues_complete: true if ANY of these: (a) customer explicitly said no more issues ("no", "nope", "that's all", "nothing else", "done", "just that", "that's it", "no more", "only that", "that's everything"), (b) conversation has moved past issues stage — date, time, name, phone, or email have been provided, (c) customer gave a clear single issue AND the agent has already acknowledged it and asked for more AND customer replied with "no" or equivalent. Set false only if issues are still actively being collected and customer has NOT yet confirmed they're done.
-- pending_more_issue: true ONLY when ALL THREE of these conditions are met simultaneously:
-    (1) The agent's MOST RECENT message was explicitly asking about ADDITIONAL/OTHER issues — it must contain phrases like "any other issues", "anything else to include", "any other problems", "more issues". A message asking the customer to FIRST describe their issues ("Could you describe the issue(s)", "What issues are you facing?", "I'll include everything in the inspection") does NOT count — even if it contains the word "include".
-    (2) The customer's MOST RECENT reply was a SHORT AFFIRMATIVE ONLY — single words or very short phrases like "yes", "yeah", "sure", "one more", "also", "yep" — with absolutely NO property issue description following it.
-    (3) This is NOT the customer's first issue description in the conversation. If issues list was empty before this turn, pending_more_issue must be false.
-    CRITICAL NEGATIVE EXAMPLE — pending_more_issue MUST be false:
-      Agent: "Could you describe the issue(s) you are facing?" → Customer: "Black mould on the ceiling"
-      Reason: agent was asking for the FIRST description (not asking about OTHER/ADDITIONAL issues), so condition (1) fails → pending_more_issue = false
-    CRITICAL POSITIVE EXAMPLE — pending_more_issue MUST be true:
-      Agent: "Are you facing any other issues as well?" → Customer: "yes"
-      Reason: agent explicitly asked about OTHER issues (condition 1 ✅), customer replied with short affirmative only (condition 2 ✅), issues list already had entries (condition 3 ✅) → pending_more_issue = true
-    MORE EXAMPLES where pending_more_issue = false: customer says "Black mould on ceiling" (issue described), "also there's rising damp" (issue described), "yes there is mould" (contains description), "the roof is leaking" (issue described).
-    MORE EXAMPLES where pending_more_issue = true: agent asked "any other issues?" and customer replied ONLY "yes" or ONLY "one more" with nothing else.
+- pending_more_issue: Use this simple two-step test:
+    STEP A — Does the customer's LAST message contain ANY property/issue word? Check for: damp, mould, mold, mold, leak, leaking, crack, rot, pest, roof, drain, window, wall, ceiling, floor, water, stain, smell, smell, damp, condensation, rising, penetrating, wet, dry, structural, tiles, brick, render. If YES → pending_more_issue = false. Full stop. No further checks needed.
+    STEP B — Only if STEP A is false (no property word found): set pending_more_issue = true ONLY if ALL of: (a) the customer's last message is a short affirmative only — "yes", "yeah", "yep", "sure", "ok", "one more", "also", "another" — with no other content; AND (b) the issues list already has at least one entry before this turn.
+    DEFAULT: when in doubt, set pending_more_issue = false.
 - date: ONLY for new bookings — specific date given or date button clicked
 - time: ONLY for new bookings — time slot selected or typed, converted to HH:MM 24h
 - name/phone/email: ONLY if customer explicitly provided these for a NEW booking
