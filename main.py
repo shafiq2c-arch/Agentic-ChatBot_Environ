@@ -1202,6 +1202,39 @@ def build_messages(req: ChatRequest) -> tuple[list, str]:
     if session_state:
         messages.append({"role": "system", "content": session_state})
 
+    # ── Dynamic mandatory-phrase injection ─────────────────────────────────
+    # Detect competitor / urgency triggers and inject a pinned system note so
+    # GPT-4o cannot paraphrase the required opening phrase.
+    _msg_lower = req.message.lower()
+    _competitor_kw = [
+        "another company", "other company", "another firm", "different company",
+        "quoted me", "got a quote", "i got a quote", "quote from", "price from",
+        "comparing", "comparing options", "someone else quoted",
+        "cheaper elsewhere", "found a cheaper", "found cheaper",
+    ]
+    _urgency_kw = [
+        "urgent", "emergency", "water is coming", "water coming",
+        "flooding", "flood", "getting worse", "right now", "coming through my roof",
+        "coming in now", "leaking now", "it's leaking", "asap",
+    ]
+    if any(kw in _msg_lower for kw in _competitor_kw):
+        messages.append({"role": "system", "content": (
+            "⚠️ COMPETITOR KEYWORD DETECTED in the customer's message.\n"
+            "Your reply MUST begin with these exact words — no exceptions, no variations:\n"
+            "\"That's great that you're comparing options! 😊\"\n"
+            "Do NOT open with 'At Environ', 'Great question', 'I understand', or anything else. "
+            "Those four words above are your first words, full stop."
+        )})
+    elif any(kw in _msg_lower for kw in _urgency_kw):
+        messages.append({"role": "system", "content": (
+            "⚠️ URGENCY KEYWORD DETECTED in the customer's message.\n"
+            "Your reply MUST begin with these exact words — no exceptions, no variations:\n"
+            "\"I understand — let's get this sorted as quickly as possible! 🏠\"\n"
+            "Do NOT open with 'I'm sorry', bullet points, tips, or anything else. "
+            "Those words above are your first words. "
+            "After that line, immediately move into the booking flow."
+        )})
+
     user_text = (
         f"Knowledge base context:\n{context}\n\n---\n\nUser: {req.message}"
         if context else req.message
