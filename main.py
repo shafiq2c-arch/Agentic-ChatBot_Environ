@@ -303,6 +303,11 @@ def get_calendar_service():
 
 
 def check_calendar_availability(date_str: str) -> dict:
+    # Normalise to ISO format — the LLM sometimes passes "Next Thursday" etc.
+    if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_str.strip()):
+        parsed = _parse_date_str_to_iso(date_str)
+        if parsed:
+            date_str = parsed
     _prev = _socket.getdefaulttimeout()
     _socket.setdefaulttimeout(_GCAL_TIMEOUT)
     try:
@@ -352,10 +357,14 @@ def check_calendar_availability(date_str: str) -> dict:
         print(f"[CALENDAR ERROR] check_availability: {e}", flush=True)
         # Fallback: return all standard slots so the bot can still show time buttons.
         # The booking step does a live double-check before creating the calendar event.
-        _dt = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+        try:
+            _dt = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+            formatted = _dt.strftime("%A, %d %B %Y")
+        except ValueError:
+            formatted = date_str  # keep whatever the model passed
         return {
             "date":           date_str,
-            "formatted_date": _dt.strftime("%A, %d %B %Y"),
+            "formatted_date": formatted,
             "available":      True,
             "slots":          [f"{h:02d}:00" for h in range(WORK_START_H, WORK_END_H)],
             "message":        "",
@@ -1173,12 +1182,33 @@ Conversation:
 
 
 def _parse_date_str_to_iso(date_raw: str) -> str:
-    """Convert natural date strings like 'Monday 18 May' or '18 May 2026' to YYYY-MM-DD."""
+    """Convert natural date strings to YYYY-MM-DD.
+    Handles: 'Monday 18 May', '18 May 2026', 'next Thursday', 'this Friday', 'Thursday' alone.
+    """
     today = datetime.date.today()
-    date_raw = date_raw.strip()
+    s = date_raw.strip()
+
+    # ── Relative weekday: "next Thursday", "this Monday", or bare "Thursday" ──
+    _WEEKDAYS = {
+        "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+        "friday": 4, "saturday": 5, "sunday": 6,
+    }
+    lower = s.lower()
+    for prefix in ("next ", "this ", ""):
+        if lower.startswith(prefix):
+            candidate = lower[len(prefix):].strip()
+            if candidate in _WEEKDAYS:
+                target = _WEEKDAYS[candidate]
+                days_ahead = (target - today.weekday()) % 7
+                # "next <day>" or same weekday today → always push at least 1 day
+                if days_ahead == 0 or prefix == "next ":
+                    days_ahead = days_ahead if days_ahead > 0 else 7
+                return (today + datetime.timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+
+    # ── Explicit date formats ──
     for fmt in ["%A %d %B %Y", "%A, %d %B %Y", "%d %B %Y", "%d %B", "%A %d %B", "%A, %d %B"]:
         try:
-            dt = datetime.datetime.strptime(date_raw, fmt)
+            dt = datetime.datetime.strptime(s, fmt)
             if dt.year == 1900:
                 dt = dt.replace(year=today.year)
                 if dt.date() < today:
