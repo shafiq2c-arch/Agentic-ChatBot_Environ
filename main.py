@@ -1255,7 +1255,7 @@ def build_messages(req: ChatRequest) -> tuple[list, str]:
         user_content = user_text
 
     messages.append({"role": "user", "content": user_content})
-    return messages, "deepseek/deepseek-v4-pro"
+    return messages, "deepseek/deepseek-chat"
 
 
 # ── Chat endpoint ──────────────────────────────────
@@ -1446,9 +1446,11 @@ async def chat(req: ChatRequest):
         try:
             yield from generate()
         except Exception as err:
-            print(f"[GENERATE ERROR] {err}", flush=True)
-            import traceback; traceback.print_exc()
-            yield f"data: {json.dumps({'token': 'I ran into a technical issue. Please try again or contact us directly!'})}\n\n"
+            import traceback
+            err_detail = f"{type(err).__name__}: {err}"
+            print(f"[GENERATE ERROR] {err_detail}", flush=True)
+            traceback.print_exc()
+            yield f"data: {json.dumps({'token': f'ERROR: {err_detail}'})}\n\n"
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(
