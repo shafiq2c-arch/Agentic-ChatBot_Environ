@@ -1251,7 +1251,7 @@ def build_messages(req: ChatRequest) -> tuple[list, str]:
         user_content = user_text
 
     messages.append({"role": "user", "content": user_content})
-    return messages, "deepseek/deepseek-v4-0324"
+    return messages, "deepseek/deepseek-chat"
 
 
 # ── Chat endpoint ──────────────────────────────────
