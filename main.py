@@ -264,7 +264,14 @@ chroma_collection     = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global openai_client, chroma_collection
-    openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    openai_client = OpenAI(
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+        base_url="https://openrouter.ai/api/v1",
+        default_headers={
+            "HTTP-Referer": "https://chatbot.app.digitalsgalaxy.com",
+            "X-Title": "Environ Property Services Chatbot",
+        },
+    )
     chroma = chromadb.PersistentClient(path=CHROMA_PATH)
     chroma_collection = chroma.get_or_create_collection(
         name=COLLECTION_NAME,
@@ -973,7 +980,7 @@ Conversation:
 
     try:
         resp = openai_client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model="deepseek/deepseek-chat",
             messages=[{"role": "user", "content": extraction_prompt}],
             response_format={"type": "json_object"},
             max_tokens=400,
@@ -1244,7 +1251,7 @@ def build_messages(req: ChatRequest) -> tuple[list, str]:
         user_content = user_text
 
     messages.append({"role": "user", "content": user_content})
-    return messages, "gpt-4.1"
+    return messages, "deepseek/deepseek-v4-0324"
 
 
 # ── Chat endpoint ──────────────────────────────────
