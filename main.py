@@ -257,13 +257,15 @@ TOOLS = [
 ]
 
 # ── Global clients ─────────────────────────────────
-openai_client: OpenAI = None
+openai_client: OpenAI = None   # OpenRouter — used for chat completions
+embed_client:  OpenAI = None   # OpenAI direct — used for text embeddings only
 chroma_collection     = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global openai_client, chroma_collection
+    global openai_client, embed_client, chroma_collection
+    # Chat completions → OpenRouter (DeepSeek)
     openai_client = OpenAI(
         api_key=os.getenv("OPENROUTER_API_KEY"),
         base_url="https://openrouter.ai/api/v1",
@@ -272,6 +274,8 @@ async def lifespan(app: FastAPI):
             "X-Title": "Environ Property Services Chatbot",
         },
     )
+    # Embeddings → OpenAI directly (OpenRouter does not support the embeddings endpoint)
+    embed_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     chroma = chromadb.PersistentClient(path=CHROMA_PATH)
     chroma_collection = chroma.get_or_create_collection(
         name=COLLECTION_NAME,
@@ -722,7 +726,8 @@ def execute_tool(name: str, args: dict) -> dict:
 
 # ── RAG ────────────────────────────────────────────
 def embed_query(text: str) -> list:
-    return openai_client.embeddings.create(
+    # Always use the direct OpenAI client — OpenRouter does not support the embeddings endpoint
+    return embed_client.embeddings.create(
         model="text-embedding-3-small", input=[text]
     ).data[0].embedding
 
