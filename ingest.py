@@ -1,21 +1,18 @@
 """
 Ingest the Environ Property Services knowledge base into ChromaDB.
 Run this once before starting the server: python ingest.py
+
+Embeddings are handled locally by ChromaDB's built-in model (all-MiniLM-L6-v2
+via ONNX). No OpenAI API key or any external embedding service is required.
 """
-import os
 import re
 import time
 from pathlib import Path
 import chromadb
-from openai import OpenAI
-from dotenv import load_dotenv
 
-load_dotenv()
-
-CHROMA_PATH = "./chroma_db"
-COLLECTION_NAME = "environ_knowledge"
-EMBED_MODEL = "text-embedding-3-small"
-MAX_CHUNK = 1200
+CHROMA_PATH      = "./chroma_db"
+COLLECTION_NAME  = "environ_knowledge"
+MAX_CHUNK        = 1200
 
 # Look for the data file in common locations
 DATA_PATHS = [
@@ -81,18 +78,7 @@ def chunk_text(text: str) -> list[str]:
     return chunks
 
 
-def get_embeddings(texts: list[str], client: OpenAI) -> list[list[float]]:
-    resp = client.embeddings.create(model=EMBED_MODEL, input=texts)
-    return [r.embedding for r in resp.data]
-
-
 def main():
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY not set. Create a .env file (see .env.example).")
-
-    client = OpenAI(api_key=api_key)
-
     data_file = find_data_file()
     print(f"Reading: {data_file}")
     text = data_file.read_text(encoding="utf-8")
@@ -108,24 +94,24 @@ def main():
     except Exception:
         pass
 
+    # No embedding_function argument → ChromaDB uses its built-in local model
+    # (all-MiniLM-L6-v2 via ONNX). Embeddings are generated on-device; no API key needed.
     collection = chroma.create_collection(
         name=COLLECTION_NAME,
         metadata={"hnsw:space": "cosine"},
     )
 
-    # Embed and store in batches of 50
+    # Store in batches — ChromaDB embeds automatically when only documents are provided
     batch_size = 50
     for i in range(0, len(chunks), batch_size):
         batch = chunks[i : i + batch_size]
-        vecs = get_embeddings(batch, client)
         collection.add(
             documents=batch,
-            embeddings=vecs,
             ids=[f"c{i + j}" for j in range(len(batch))],
         )
         print(f"  Indexed {min(i + batch_size, len(chunks))}/{len(chunks)} chunks")
         if i + batch_size < len(chunks):
-            time.sleep(0.2)
+            time.sleep(0.05)
 
     print(f"\nDone! {collection.count()} chunks stored in ChromaDB.")
 

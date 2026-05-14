@@ -257,15 +257,14 @@ TOOLS = [
 ]
 
 # ── Global clients ─────────────────────────────────
-openai_client: OpenAI = None   # OpenRouter — used for chat completions
-embed_client:  OpenAI = None   # OpenAI direct — used for text embeddings only
+openai_client: OpenAI = None   # OpenRouter — used for ALL LLM calls (DeepSeek)
 chroma_collection     = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global openai_client, embed_client, chroma_collection
-    # Chat completions → OpenRouter (DeepSeek)
+    global openai_client, chroma_collection
+    # All LLM calls → OpenRouter (DeepSeek only — no OpenAI API key required)
     openai_client = OpenAI(
         api_key=os.getenv("OPENROUTER_API_KEY"),
         base_url="https://openrouter.ai/api/v1",
@@ -274,9 +273,9 @@ async def lifespan(app: FastAPI):
             "X-Title": "Environ Property Services Chatbot",
         },
     )
-    # Embeddings → OpenAI directly (OpenRouter does not support the embeddings endpoint)
-    embed_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     chroma = chromadb.PersistentClient(path=CHROMA_PATH)
+    # No embedding_function specified → ChromaDB uses its built-in local model
+    # (all-MiniLM-L6-v2 via ONNX). No external API key needed.
     chroma_collection = chroma.get_or_create_collection(
         name=COLLECTION_NAME,
         metadata={"hnsw:space": "cosine"},
@@ -725,20 +724,20 @@ def execute_tool(name: str, args: dict) -> dict:
 
 
 # ── RAG ────────────────────────────────────────────
-def embed_query(text: str) -> list:
-    # Always use the direct OpenAI client — OpenRouter does not support the embeddings endpoint
-    return embed_client.embeddings.create(
-        model="text-embedding-3-small", input=[text]
-    ).data[0].embedding
-
-
 def retrieve_context(query: str, n: int = 3) -> str:
+    """Retrieve relevant knowledge-base chunks using ChromaDB's local embedding model."""
     if not chroma_collection or chroma_collection.count() == 0:
         return ""
-    docs = chroma_collection.query(
-        query_embeddings=[embed_query(query)], n_results=n
-    ).get("documents", [[]])[0]
-    return "\n\n---\n\n".join(docs)
+    try:
+        # query_texts lets ChromaDB embed the query using its built-in local model —
+        # no external API call required.
+        docs = chroma_collection.query(
+            query_texts=[query], n_results=n
+        ).get("documents", [[]])[0]
+        return "\n\n---\n\n".join(docs)
+    except Exception as e:
+        print(f"[RAG ERROR] {e}", flush=True)
+        return ""
 
 
 # ── Request model ──────────────────────────────────
