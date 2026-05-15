@@ -126,7 +126,7 @@ STEP 9 — Book: Call book_appointment only AFTER confirmation. Pass ALL issues 
 - Each step asks ONE question and waits. Move on after the reply — never loop on the same step.
 - Typed time in HH:MM (e.g. "13:00") = valid slot. Proceed with it.
 - NEVER validate email — any string with @ is valid. NEVER validate phone — any digits are valid.
-- Confirmation words (yes/sure/ok/yeah/correct/go ahead/confirm/please/do it/yep) = proceed.
+- Confirmation words (yes/sure/ok/yeah/correct/go ahead/confirm/please/do it/yep/done/sounds good/perfect/that works/great/absolutely/confirmed/looks good/all good/proceed) = proceed.
 - On slot_taken: call check_availability for same date, show new buttons, book with SAME details.
 - book_appointment needs: date, time, name, phone, email, service, issue — all 7 fields.
 - SERVICE CHANGE during new booking: if the customer changes the service mid-booking (e.g. "actually, make it a damp survey", "change the service to X"), simply update the service and continue the new booking flow — do NOT treat this as a cancel or reschedule request.
@@ -1074,7 +1074,7 @@ Conversation:
             model="deepseek/deepseek-chat",
             messages=[{"role": "user", "content": extraction_prompt}],
             response_format={"type": "json_object"},
-            max_tokens=180,   # was 400 — JSON output is small, 180 is plenty
+            max_tokens=300,   # was 180 — bumped to prevent JSON truncation when issues list is long
             temperature=0,
         )
         state = json.loads(resp.choices[0].message.content)
@@ -1468,8 +1468,24 @@ async def chat(req: ChatRequest):
         _has_time             = "⏰ Time:" in _state_text
         _has_issues_complete  = "Issues finalised: Yes" in _state_text
         _in_reschedule_cancel = "RESCHEDULE STATE" in _state_text or "CANCEL STATE" in _state_text
-        # Only force check_availability for NEW bookings, after issues are confirmed,
-        # and only when date is known but time is not yet selected.
+
+        # ── Fallback date detection ────────────────────────────────────────────
+        # If the state extractor failed (e.g. JSON truncated at 300 tokens) and
+        # _has_date is False, scan the raw conversation for a parseable date in
+        # the customer's most recent messages so we can still force check_availability.
+        if not _has_date and not _in_reschedule_cancel:
+            _date_pattern = re.compile(
+                r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday)"
+                r"(?:\s*,?\s*\d{1,2}\s+\w+(?:\s+\d{4})?)?"
+                r"|\b\d{1,2}[\s/\-]\w+[\s/\-]\d{2,4}"
+                r"|\b\d{4}-\d{2}-\d{2}\b",
+                re.IGNORECASE,
+            )
+            for _m in reversed(req.history[-6:]):
+                if _m.role == "user" and _date_pattern.search(_m.content or ""):
+                    _has_date = True
+                    break
+
         # Force check_availability whenever date is known but time is not — for new bookings.
         # We intentionally drop the _has_issues_complete guard: if a date is already in the
         # state the customer has moved past the issues stage, so proceeding is always correct.
