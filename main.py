@@ -60,6 +60,7 @@ You are a CUSTOMER SUPPORT assistant first. Your job is to:
 
 STYLE: Friendly and helpful. 2-4 sentences or short bullet points. No jargon. No long paragraphs.
 Use bullet points by default. Only use a markdown table if the user explicitly asks for one — and keep it concise (max 6 rows).
+EMOJI RULE: Use emojis sparingly — maximum ONE emoji per response, and only when it genuinely adds warmth. Do NOT end every message with 😊. Most responses should have no emoji at all. Never repeat the same emoji twice in a row across messages.
 COMPLAINTS: If the customer expresses frustration, dissatisfaction, or a complaint (e.g. "this is unacceptable", "last time was terrible", "I'm really upset"), acknowledge their feelings FIRST before anything else. Say something like: "I'm really sorry to hear that — that's not the experience we want you to have at all." Then offer to help resolve the situation. Never be defensive or dismissive.
 RESPONSE SPEED QUESTIONS: If the customer asks WHY you are slow, what causes the delay, or anything about your response time (e.g. "why are you slow", "what makes you slow", "why does it take so long") — do NOT treat this as a complaint. Give a brief, honest, friendly answer: "I'm an AI assistant and each response is generated in real time, which can take 10–15 seconds depending on the complexity of the question. Thanks for your patience! 😊 How can I help you today?" Do not apologise repeatedly — answer the actual question.
 REPETITION GUARD — CRITICAL: If you look back at the conversation and your last 2 or more responses contain the same or very similar wording, you are stuck in a loop. STOP immediately. Do not repeat that response again. Instead, acknowledge what the customer is actually asking and give a genuinely different, more helpful reply. If they are asking a question you cannot answer, say so honestly and redirect: "That's outside what I can help with, but I'm here for any property questions or bookings — what can I assist you with? 😊"
@@ -1009,9 +1010,9 @@ def extract_booking_state(history: list) -> str:
 
     today = datetime.date.today().strftime("%A, %d %B %Y")
     transcript_lines = []
-    for m in history[-30:]:
+    for m in history[-16:]:   # was -30, reduced for speed
         role_label = "Customer" if m.role == "user" else "Agent"
-        transcript_lines.append(f"{role_label}: {m.content.strip()[:400]}")
+        transcript_lines.append(f"{role_label}: {m.content.strip()[:200]}")  # was 400
     transcript = "\n".join(transcript_lines)
 
     extraction_prompt = f"""You are a booking state extractor for a property inspection chatbot.
@@ -1073,7 +1074,7 @@ Conversation:
             model="deepseek/deepseek-chat",
             messages=[{"role": "user", "content": extraction_prompt}],
             response_format={"type": "json_object"},
-            max_tokens=400,
+            max_tokens=180,   # was 400 — JSON output is small, 180 is plenty
             temperature=0,
         )
         state = json.loads(resp.choices[0].message.content)
@@ -1313,7 +1314,7 @@ def build_messages(req: ChatRequest) -> tuple[list, str]:
     session_state = future_state.result(timeout=30)
 
     messages = [{"role": "system", "content": system}]
-    for m in req.history[-20:]:
+    for m in req.history[-12:]:   # was -20, reduced for speed
         messages.append({"role": m.role, "content": m.content})
 
     if session_state:
@@ -1447,7 +1448,7 @@ async def chat(req: ChatRequest):
             messages=messages,
             tools=TOOLS,
             tool_choice=_forced_tool_choice,
-            max_tokens=500,
+            max_tokens=350,   # was 500 — responses are short, 350 is enough
             temperature=0.4,
         )
         choice = response.choices[0]
@@ -1461,6 +1462,33 @@ async def chat(req: ChatRequest):
 
             for tc in msg.tool_calls:
                 args   = json.loads(tc.function.arguments)
+
+                # ── Hard guard: never book without all 7 required fields ──────
+                # This prevents the LLM from calling book_appointment mid-flow
+                # before it has collected name, phone, and email from the customer.
+                if tc.function.name == "book_appointment":
+                    _required = ["date", "time", "name", "phone", "email", "service", "issue"]
+                    _missing  = [f for f in _required if not str(args.get(f, "")).strip()]
+                    if _missing:
+                        print(f"[BOOKING GUARD] blocked — missing fields: {_missing}", flush=True)
+                        result = {
+                            "success": False,
+                            "error":   "missing_fields",
+                            "missing": _missing,
+                            "message": (
+                                f"BOOKING BLOCKED — the following fields are missing and MUST be "
+                                f"collected from the customer before calling book_appointment again: "
+                                f"{', '.join(_missing)}. Ask for each missing field one at a time."
+                            )
+                        }
+                        tool_results.append({
+                            "role":         "tool",
+                            "tool_call_id": tc.id,
+                            "content":      json.dumps(result)
+                        })
+                        continue  # skip execute_tool entirely
+                # ─────────────────────────────────────────────────────────────
+
                 result = execute_tool(tc.function.name, args)
 
                 if tc.function.name == "check_availability" and result.get("slots"):
@@ -1550,7 +1578,7 @@ async def chat(req: ChatRequest):
                 openai_client.chat.completions.create,
                 model=follow_up_model,
                 messages=follow_up,
-                max_tokens=600,
+                max_tokens=400,   # was 600
                 temperature=0.4,
                 stream=True,
             )
