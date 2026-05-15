@@ -1326,6 +1326,23 @@ def build_messages(req: ChatRequest) -> tuple[list, str]:
     if session_state:
         messages.append({"role": "system", "content": session_state})
 
+    # ── Photo reference on follow-up messages ──────────────────────────────
+    # If a previous message in history contains [Photo attached] but the CURRENT
+    # message has no image, the model may wrongly say "I can't see the image."
+    # Inject a reminder so it refers back to its earlier analysis instead.
+    _has_prior_photo = not req.image_base64 and any(
+        "[Photo attached]" in (m.content or "") for m in req.history
+    )
+    if _has_prior_photo:
+        messages.append({"role": "system", "content": (
+            "📷 NOTE: The customer sent a photo earlier in this conversation (marked [Photo attached] in history). "
+            "You already analysed that image in your previous response. "
+            "Do NOT say you cannot see the image or ask them to re-send it. "
+            "If they ask what you can see or refer to the photo, look at YOUR EARLIER response "
+            "in this conversation and refer back to what you described. "
+            "Say something like: 'From the photo you shared earlier, I could see [your earlier finding].'"
+        )})
+
     # ── Dynamic mandatory-phrase injection ─────────────────────────────────
     # Detect competitor / urgency triggers and inject a pinned system note so
     # GPT-4o cannot paraphrase the required opening phrase.
@@ -1377,6 +1394,21 @@ def build_messages(req: ChatRequest) -> tuple[list, str]:
     )
 
     if req.image_base64:
+        # ── IMAGE OVERRIDE: force analysis before anything else ────────────────
+        # Without this, the booking-state NEXT STEP instruction overrides image
+        # analysis and GPT-4o asks "What service do you need?" instead of
+        # describing the photo. This pinned note has higher priority.
+        messages.append({"role": "system", "content": (
+            "🖼️ IMAGE ATTACHED — THIS OVERRIDES ALL OTHER NEXT STEP INSTRUCTIONS.\n"
+            "The customer has sent a photo of their property issue.\n"
+            "You MUST do ALL of the following before anything else:\n"
+            "1. Study the image carefully.\n"
+            "2. Describe exactly what you can see (damp patches, mould, cracks, rot, staining, etc.).\n"
+            "3. Identify the likely issue and severity.\n"
+            "4. Give brief practical advice.\n"
+            "Do NOT ask 'What service do you need?' or jump to booking steps — the image IS the issue description.\n"
+            "After your analysis, you may gently offer a free inspection as a next step."
+        )})
         user_content = [
             {"type": "text", "text": user_text},
             {"type": "image_url", "image_url": {
