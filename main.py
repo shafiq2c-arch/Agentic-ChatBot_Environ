@@ -61,6 +61,8 @@ You are a CUSTOMER SUPPORT assistant first. Your job is to:
 STYLE: Friendly and helpful. 2-4 sentences or short bullet points. No jargon. No long paragraphs.
 Use bullet points by default. Only use a markdown table if the user explicitly asks for one — and keep it concise (max 6 rows).
 COMPLAINTS: If the customer expresses frustration, dissatisfaction, or a complaint (e.g. "this is unacceptable", "last time was terrible", "I'm really upset"), acknowledge their feelings FIRST before anything else. Say something like: "I'm really sorry to hear that — that's not the experience we want you to have at all." Then offer to help resolve the situation. Never be defensive or dismissive.
+RESPONSE SPEED QUESTIONS: If the customer asks WHY you are slow, what causes the delay, or anything about your response time (e.g. "why are you slow", "what makes you slow", "why does it take so long") — do NOT treat this as a complaint. Give a brief, honest, friendly answer: "I'm an AI assistant and each response is generated in real time, which can take 10–15 seconds depending on the complexity of the question. Thanks for your patience! 😊 How can I help you today?" Do not apologise repeatedly — answer the actual question.
+REPETITION GUARD — CRITICAL: If you look back at the conversation and your last 2 or more responses contain the same or very similar wording, you are stuck in a loop. STOP immediately. Do not repeat that response again. Instead, acknowledge what the customer is actually asking and give a genuinely different, more helpful reply. If they are asking a question you cannot answer, say so honestly and redirect: "That's outside what I can help with, but I'm here for any property questions or bookings — what can I assist you with? 😊"
 
 ━━━ COMPETITOR MENTIONS — MANDATORY RULE ━━━
 TRIGGER: Whenever the customer mentions another company, a quote from a different company, a competitor's price, or indicates they are comparing services (e.g. "another company quoted me", "I got a quote from X", "comparing quotes", "someone else said", "I found a cheaper option").
@@ -89,7 +91,9 @@ FAST-TRACK: If the customer's opening message already contains service, date, is
 STEP 2 — Issues (multi-issue collection):
   • If a photo was shared ([Photo attached] in history): you already know the issue from the image — do NOT ask the customer to describe it again. Still ask "Are you also facing any other issues I should include?"
   • If no photo: ask "Could you describe the issue(s) you are facing?"
-  • VAGUE DESCRIPTIONS: If the customer's reply is too vague (e.g. "a problem", "something wrong", "an issue with my house"), ask one short clarifying question: "Could you tell me a bit more about what you're seeing? For example, is it damp, mould, a crack, or something else?" — accept whatever they reply next as the issue, no matter how brief.
+  • VAGUE DESCRIPTIONS: If the customer's reply is too vague (e.g. "a problem", "something wrong", "an issue with my house"), ask ONE short clarifying question: "Could you tell me a bit more about what you're seeing? For example, is it damp, mould, a crack, or something else?" — accept whatever they reply next as the issue, no matter how brief.
+  • UNCERTAINTY LOOP PREVENTION — CRITICAL: If you have already asked the customer once about their issue (or asked a clarifying question) and they STILL cannot describe it (e.g. "I'm not sure", "not sure", "I don't know", "can't say", "not certain", "not really sure") — do NOT ask again. You have asked once, that is enough. Immediately respond: "No worries at all — our specialist will assess everything on-site! Let's get you booked in 😊" and move straight to asking for a date. Use "property issue to be assessed on-site" as the issue if nothing specific was given.
+  • BOOKING INTENT OVERRIDES ISSUE LOOP: If the customer says "book", "book an inspection", "can you book", "arrange a visit", "send someone" at ANY point — even if their issue description is unclear — treat that as a signal to STOP asking about issues and proceed immediately to the date step. Use whatever property context exists in the conversation (e.g. "damp", "wall issue", "damping issue") as the issue description. Never block a booking request by demanding more issue detail.
   • After receiving the first issue description, ALWAYS ask: "Are you facing any other issues as well? I can include everything in a single inspection — just let me know! 😊"
   • When the user mentions more issues using phrases like "also", "another issue", "one more thing", "and also", "plus", "as well", "additionally", "there's also" — collect each one and ask again.
   • IMPORTANT: If the customer uses a trigger phrase AND includes an issue description in the SAME message (e.g. "also there's mould", "one more thing — the roof is leaking"), accept the issue immediately — do NOT ask them to describe it again. Just acknowledge it and ask if there are any more.
@@ -704,8 +708,37 @@ def _send_reschedule_email(name: str, old_dt: datetime.datetime, new_dt: datetim
 
 
 # ── Tool executor ──────────────────────────────────
-_TOOL_EXECUTOR = ThreadPoolExecutor(max_workers=4)
+_TOOL_EXECUTOR = ThreadPoolExecutor(max_workers=20)  # handles 100+ concurrent users
 _TOOL_TIMEOUT  = 15  # seconds
+
+# ── Resilient OpenRouter call wrapper ──────────────
+import time as _time
+
+def _llm_call_with_retry(fn, *args, max_retries: int = 3, **kwargs):
+    """
+    Call any openai_client.chat.completions.create() with automatic
+    exponential-backoff retry on rate-limit (429) and transient errors.
+    Raises on the last attempt if still failing.
+    """
+    delay = 1.5  # initial backoff seconds
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            last_err = e
+            err_str = str(e).lower()
+            # Retry on rate limit or server-side 5xx
+            if any(x in err_str for x in ("429", "rate limit", "502", "503", "504", "timeout")):
+                if attempt < max_retries - 1:
+                    wait = delay * (2 ** attempt)   # 1.5s, 3s, 6s
+                    print(f"[LLM RETRY] attempt {attempt+1} failed ({type(e).__name__}), "
+                          f"retrying in {wait:.1f}s...", flush=True)
+                    _time.sleep(wait)
+                    continue
+            raise  # non-retryable error — surface immediately
+    raise last_err
+
 
 def execute_tool(name: str, args: dict) -> dict:
     def _run():
@@ -890,6 +923,47 @@ def validate_input(message: str) -> dict:
     return {"ok": True}
 
 
+# ── Loop detector ─────────────────────────────────
+_LOOP_BREAK = (
+    "I think I may have been going in circles there — sorry about that! 😊 "
+    "I'm here to help with any property questions, damp surveys, mould, roofing, "
+    "or to arrange a free inspection. What can I help you with today?"
+)
+
+def _detect_loop(current: str, history: list) -> bool:
+    """
+    Returns True if `current` is too similar to recent bot messages,
+    indicating the bot is stuck in a repetition loop.
+    Purely code-level — does not rely on the LLM to self-detect.
+    """
+    if not current or not history:
+        return False
+
+    # Collect last 2 assistant responses from history
+    bot_msgs = [m.content for m in history if m.role == "assistant"][-2:]
+    if not bot_msgs:
+        return False
+
+    curr_norm = current.lower().strip()
+
+    for prev in bot_msgs:
+        prev_norm = prev.lower().strip()
+
+        # 1. Opening-line match — if first 80 chars are the same, it's a loop
+        if curr_norm[:80] and prev_norm[:80] and curr_norm[:80] == prev_norm[:80]:
+            return True
+
+        # 2. Word-overlap ratio on first 250 chars — catches paraphrased repeats
+        c_words = set(curr_norm[:250].split())
+        p_words = set(prev_norm[:250].split())
+        if len(c_words) >= 8 and len(p_words) >= 8:
+            overlap = len(c_words & p_words) / max(len(c_words), len(p_words))
+            if overlap > 0.78:
+                return True
+
+    return False
+
+
 def validate_output(text: str) -> str:
     if not text:
         return text
@@ -973,7 +1047,9 @@ Field rules:
     CRITICAL: Only set "reschedule" or "cancel" if the customer explicitly wants to act on an ALREADY EXISTING booking (keywords: "cancel my appointment", "reschedule my booking", "move my existing appointment"). If the customer is modifying details of a NEW booking currently in progress (e.g. "change the service", "update the date"), keep intent as "new_booking". If reschedule/cancel intent appeared earlier but a NEW booking is now clearly in progress (service+issues+date+time+name all collected), keep intent as "new_booking".
 - service: extract from customer message OR from agent recommendation the customer accepted — for NEW bookings only
 - issues: every distinct property issue the customer mentioned. Deduplicate. Ignore meta-replies like "its an issue" or "a problem". Include issues from ANY message including the first one. If the customer described an issue AND immediately confirmed no more ("I have damp, that's it" / "just mould, nothing else"), include the issue AND set issues_complete to true in the same turn.
-- issues_complete: true if ANY of these: (a) customer explicitly said no more issues ("no", "nope", "that's all", "nothing else", "done", "just that", "that's it", "no more", "only that", "that's everything"), (b) conversation has moved past issues stage — date, time, name, phone, or email have been provided, (c) customer gave a clear single issue AND the agent has already acknowledged it and asked for more AND customer replied with "no" or equivalent. Set false only if issues are still actively being collected and customer has NOT yet confirmed they're done.
+  UNCERTAINTY RULE: If the customer said "I'm not sure", "not sure", "I don't know", "can't tell" when asked to describe their issue, look back through ALL earlier messages for ANY property context (e.g. "damp", "wall", "mould", "leak", "crack") and use that as the issue (e.g. "damp wall issue"). If absolutely no property context exists anywhere, use "property issue to be assessed on-site". Never leave issues as an empty list when the customer has expressed a desire to book — always extract something.
+  BOOKING INTENT RULE: If the customer says "book", "book an inspection", "arrange a visit", "send someone", "can you book" — treat the conversation as having sufficient issue context to proceed. Extract whatever property issue was mentioned anywhere in the conversation and set issues_complete to true.
+- issues_complete: true if ANY of these: (a) customer explicitly said no more issues ("no", "nope", "that's all", "nothing else", "done", "just that", "that's it", "no more", "only that", "that's everything"), (b) conversation has moved past issues stage — date, time, name, phone, or email have been provided, (c) customer gave a clear single issue AND the agent has already acknowledged it and asked for more AND customer replied with "no" or equivalent, (d) customer said "I'm not sure" / "not sure" / "I don't know" when asked to describe the issue — they cannot provide more detail so treat as complete, (e) customer expressed booking intent ("book", "book an inspection", "arrange a visit") — they want to proceed so stop collecting issues. Set false only if issues are still actively being collected and customer has NOT yet confirmed they're done.
 - pending_more_issue: Use this simple two-step test:
     STEP A — Does the customer's LAST message contain ANY property/issue word? Check for: damp, mould, mold, mold, leak, leaking, crack, rot, pest, roof, drain, window, wall, ceiling, floor, water, stain, smell, smell, damp, condensation, rising, penetrating, wet, dry, structural, tiles, brick, render. If YES → pending_more_issue = false. Full stop. No further checks needed.
     STEP B — Only if STEP A is false (no property word found): set pending_more_issue = true ONLY if ALL of: (a) the customer's last message is a short affirmative only — "yes", "yeah", "yep", "sure", "ok", "one more", "also", "another" — with no other content; AND (b) the issues list already has at least one entry before this turn.
@@ -992,7 +1068,8 @@ Conversation:
 {transcript}"""
 
     try:
-        resp = openai_client.chat.completions.create(
+        resp = _llm_call_with_retry(
+            openai_client.chat.completions.create,
             model="deepseek/deepseek-chat",
             messages=[{"role": "user", "content": extraction_prompt}],
             response_format={"type": "json_object"},
@@ -1137,7 +1214,9 @@ Conversation:
         elif not issues_list:
             next_step = ('Ask: "Could you describe the issue(s) you are facing?" '
                          '— accept the VERY NEXT reply as-is.')
-        elif not state.get("issues_complete"):
+        elif not state.get("issues_complete") and not state.get("date"):
+            # Only confirm issues when date hasn't been given yet.
+            # If a date is already present, the customer has moved on — skip straight to check_availability.
             if state.get("pending_more_issue"):
                 next_step = ('User said yes to having more issues. Ask: '
                              '"Please describe that issue briefly." '
@@ -1222,16 +1301,21 @@ def _parse_date_str_to_iso(date_raw: str) -> str:
 def build_messages(req: ChatRequest) -> tuple[list, str]:
     today   = datetime.date.today().strftime("%A, %d %B %Y")
     system  = SYSTEM_PROMPT_TEMPLATE.format(today=today)
-    context = retrieve_context(req.message)
+
+    # ── Run RAG retrieval and state extraction in PARALLEL ──────────────────────
+    # Both are independent I/O-bound operations. Running them concurrently saves
+    # 1–2 seconds per request and reduces the window where rate limits stack up.
+    temp_history = list(req.history) + [HistoryMessage(role="user", content=req.message)]
+    future_context = _TOOL_EXECUTOR.submit(retrieve_context, req.message)
+    future_state   = _TOOL_EXECUTOR.submit(extract_booking_state, temp_history)
+
+    context       = future_context.result(timeout=10)
+    session_state = future_state.result(timeout=30)
 
     messages = [{"role": "system", "content": system}]
     for m in req.history[-20:]:
         messages.append({"role": m.role, "content": m.content})
 
-    # Include current message so the state extractor already reflects
-    # the answer the user just gave (name/phone/etc.) and skips to next step.
-    temp_history  = list(req.history) + [HistoryMessage(role="user", content=req.message)]
-    session_state = extract_booking_state(temp_history)
     if session_state:
         messages.append({"role": "system", "content": session_state})
 
@@ -1258,7 +1342,19 @@ def build_messages(req: ChatRequest) -> tuple[list, str]:
             "Do NOT open with 'At Environ', 'Great question', 'I understand', or anything else. "
             "Those four words above are your first words, full stop."
         )})
-    elif any(kw in _msg_lower for kw in _urgency_kw):
+    else:
+        # No competitor mention detected — explicitly prevent the model from spontaneously
+        # using the competitor-comparison phrase from its training data.
+        messages.append({"role": "system", "content": (
+            "🚫 NO competitor was mentioned in this message.\n"
+            "DO NOT start your reply with \"That's great that you're comparing options!\" or any variant of it. "
+            "That phrase is reserved ONLY for messages where the customer explicitly mentions another company, "
+            "a quote from a competitor, or compares services. "
+            "If you use that phrase now, you are making a serious error. "
+            "Start your reply naturally based on what the customer actually said."
+        )})
+
+    if any(kw in _msg_lower for kw in _urgency_kw):
         messages.append({"role": "system", "content": (
             "⚠️ URGENCY KEYWORD DETECTED in the customer's message.\n"
             "Your reply MUST begin with these exact words — no exceptions, no variations:\n"
@@ -1285,7 +1381,12 @@ def build_messages(req: ChatRequest) -> tuple[list, str]:
         user_content = user_text
 
     messages.append({"role": "user", "content": user_content})
-    return messages, "deepseek/deepseek-chat"
+
+    # Use a vision-capable model when an image is attached.
+    # DeepSeek is text-only — sending an image to it returns a 404.
+    # GPT-4o supports vision and handles the image analysis seamlessly.
+    model = "openai/gpt-4o" if req.image_base64 else "deepseek/deepseek-chat"
+    return messages, model
 
 
 # ── Chat endpoint ──────────────────────────────────
@@ -1308,6 +1409,12 @@ async def chat(req: ChatRequest):
         # This includes the gpt-4o-mini extract_booking_state call and the ChromaDB embedding.
         messages, model = build_messages(req)
 
+        # If an image was present, GPT-4o handles the vision turn (Step 1).
+        # All follow-up calls (tool results, streaming reply) revert to DeepSeek
+        # — the image has already been processed and vision is no longer needed.
+        _TEXT_MODEL = "deepseek/deepseek-chat"
+        follow_up_model = _TEXT_MODEL if model != _TEXT_MODEL else model
+
         # ── Detect booking stage ────────────────────────────────────────────
         # If date is collected but time is not (new booking only), FORCE check_availability
         # so slot buttons always appear — never rely on GPT-4o choosing the tool.
@@ -1324,14 +1431,18 @@ async def chat(req: ChatRequest):
         _in_reschedule_cancel = "RESCHEDULE STATE" in _state_text or "CANCEL STATE" in _state_text
         # Only force check_availability for NEW bookings, after issues are confirmed,
         # and only when date is known but time is not yet selected.
+        # Force check_availability whenever date is known but time is not — for new bookings.
+        # We intentionally drop the _has_issues_complete guard: if a date is already in the
+        # state the customer has moved past the issues stage, so proceeding is always correct.
         _forced_tool_choice = (
             {"type": "function", "function": {"name": "check_availability"}}
-            if _has_date and not _has_time and _has_issues_complete and not _in_reschedule_cancel
+            if _has_date and not _has_time and not _in_reschedule_cancel
             else "auto"
         )
 
         # Step 1: non-streaming call — detects tool calls
-        response = openai_client.chat.completions.create(
+        response = _llm_call_with_retry(
+            openai_client.chat.completions.create,
             model=model,
             messages=messages,
             tools=TOOLS,
@@ -1433,9 +1544,11 @@ async def chat(req: ChatRequest):
             if _auto_avail_ctx:
                 follow_up.append({"role": "system", "content": _auto_avail_ctx})
 
-            # Step 2: follow-up streaming response
-            stream = openai_client.chat.completions.create(
-                model=model,
+            # Step 2: follow-up streaming response — always DeepSeek even if
+            # Step 1 used GPT-4o for vision. Image already processed; no vision needed.
+            stream = _llm_call_with_retry(
+                openai_client.chat.completions.create,
+                model=follow_up_model,
                 messages=follow_up,
                 max_tokens=600,
                 temperature=0.4,
@@ -1448,6 +1561,9 @@ async def chat(req: ChatRequest):
                     raw_text += delta
 
             safe_text = validate_output(raw_text)
+            if _detect_loop(safe_text, req.history):
+                print("[LOOP DETECTED] tool-path response matches recent history — breaking loop", flush=True)
+                safe_text = _LOOP_BREAK
             for i, w in enumerate(safe_text.split(" ")):
                 yield f"data: {json.dumps({'token': w + (' ' if i < len(safe_text.split(' '))-1 else '')})}\n\n"
 
@@ -1462,6 +1578,9 @@ async def chat(req: ChatRequest):
         else:
             # No tool call — stream the direct response
             content = validate_output(choice.message.content or "")
+            if _detect_loop(content, req.history):
+                print("[LOOP DETECTED] direct response matches recent history — breaking loop", flush=True)
+                content = _LOOP_BREAK
             for i, word in enumerate(content.split(" ")):
                 token = word + (" " if i < len(content.split(" ")) - 1 else "")
                 yield f"data: {json.dumps({'token': token})}\n\n"
@@ -1472,15 +1591,37 @@ async def chat(req: ChatRequest):
         yield "data: [DONE]\n\n"
 
     def safe_generate():
-        """Wraps generate() so any uncaught exception still sends [DONE] to the client."""
+        """Wraps generate() with a silent retry + WhatsApp CTA fallback on failure."""
+        import traceback
+
+        # Track whether any content tokens have already been flushed to the client.
+        # If zero tokens went out before the crash we can retry transparently.
+        tokens_sent = [0]
+
+        def _tracked():
+            for chunk in generate():
+                if '"token"' in chunk:
+                    tokens_sent[0] += 1
+                yield chunk
+
         try:
-            yield from generate()
+            yield from _tracked()
         except Exception as err:
-            import traceback
-            err_detail = f"{type(err).__name__}: {err}"
-            print(f"[GENERATE ERROR] {err_detail}", flush=True)
+            print(f"[GENERATE ERROR] {type(err).__name__}: {err}", flush=True)
             traceback.print_exc()
-            yield f"data: {json.dumps({'token': f'ERROR: {err_detail}'})}\n\n"
+
+            if tokens_sent[0] == 0:
+                # Nothing reached the client yet — retry once silently.
+                print("[GENERATE] Retrying once...", flush=True)
+                try:
+                    yield from generate()
+                    return          # retry succeeded — done
+                except Exception as retry_err:
+                    print(f"[GENERATE RETRY FAILED] {type(retry_err).__name__}: {retry_err}", flush=True)
+
+            # Either retry also failed, or partial content was already sent.
+            # Emit a WhatsApp CTA event — no raw error text exposed to the user.
+            yield f"data: {json.dumps({'ui': 'whatsapp_error'})}\n\n"
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(
