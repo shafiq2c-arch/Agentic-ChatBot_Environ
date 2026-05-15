@@ -1306,12 +1306,18 @@ def build_messages(req: ChatRequest) -> tuple[list, str]:
     # ── Run RAG retrieval and state extraction in PARALLEL ──────────────────────
     # Both are independent I/O-bound operations. Running them concurrently saves
     # 1–2 seconds per request and reduces the window where rate limits stack up.
-    temp_history = list(req.history) + [HistoryMessage(role="user", content=req.message)]
+    temp_history   = list(req.history) + [HistoryMessage(role="user", content=req.message)]
     future_context = _TOOL_EXECUTOR.submit(retrieve_context, req.message)
-    future_state   = _TOOL_EXECUTOR.submit(extract_booking_state, temp_history)
+
+    # Skip state extractor on the very first message — no booking state can exist yet.
+    # This saves 2-3 seconds on message 1 with zero loss of information.
+    if req.history:
+        future_state = _TOOL_EXECUTOR.submit(extract_booking_state, temp_history)
+    else:
+        future_state = None
 
     context       = future_context.result(timeout=10)
-    session_state = future_state.result(timeout=30)
+    session_state = future_state.result(timeout=30) if future_state else ""
 
     messages = [{"role": "system", "content": system}]
     for m in req.history[-12:]:   # was -20, reduced for speed
@@ -1441,93 +1447,115 @@ async def chat(req: ChatRequest):
             else "auto"
         )
 
-        # Step 1: non-streaming call — detects tool calls
-        response = _llm_call_with_retry(
+        # ── Step 1: STREAMING — user sees first word in ~1s instead of waiting
+        # for the full response. Tool-call responses have empty text content so
+        # streaming them is safe — no partial text gets sent before tool execution.
+        from types import SimpleNamespace as _NS
+        stream_iter = _llm_call_with_retry(
             openai_client.chat.completions.create,
             model=model,
             messages=messages,
             tools=TOOLS,
             tool_choice=_forced_tool_choice,
-            max_tokens=350,   # was 500 — responses are short, 350 is enough
+            max_tokens=350,
             temperature=0.4,
+            stream=True,
         )
-        choice = response.choices[0]
 
-        # Check tool_calls directly — GPT-4o sometimes returns finish_reason="stop"
-        # even for forced tool calls; the tool_calls field is the reliable indicator.
-        if choice.message.tool_calls:
-            msg          = choice.message
+        raw_text       = ""
+        tc_dict        = {}   # index → {id, name, arguments} — built from stream chunks
+
+        for chunk in stream_iter:
+            delta = chunk.choices[0].delta
+
+            # Accumulate tool-call fragments silently (tool responses have no text)
+            if delta.tool_calls:
+                for tc_chunk in delta.tool_calls:
+                    idx = tc_chunk.index
+                    if idx not in tc_dict:
+                        tc_dict[idx] = {"id": "", "name": "", "arguments": ""}
+                    if tc_chunk.id:
+                        tc_dict[idx]["id"] = tc_chunk.id
+                    if tc_chunk.function:
+                        if tc_chunk.function.name:
+                            tc_dict[idx]["name"] += tc_chunk.function.name
+                        if tc_chunk.function.arguments:
+                            tc_dict[idx]["arguments"] += tc_chunk.function.arguments
+
+            # Stream text tokens immediately — only when no tool calls detected yet
+            if delta.content and not tc_dict:
+                raw_text += delta.content
+                yield f"data: {json.dumps({'token': delta.content})}\n\n"
+
+        # ── Route: tool call OR direct text ────────────────────────────────────
+        if tc_dict:
+            # ── TOOL CALL PATH ──────────────────────────────────────────────────
             tool_results = []
             ui_events    = []
+            mock_tcs     = []   # reconstructed tool call objects for _asst_msg
 
-            for tc in msg.tool_calls:
-                args   = json.loads(tc.function.arguments)
+            for tc in [_NS(id=v["id"], function=_NS(name=v["name"], arguments=v["arguments"]))
+                       for v in tc_dict.values() if v["name"]]:
 
-                # ── Hard guard: never book without all 7 required fields ──────
-                # This prevents the LLM from calling book_appointment mid-flow
-                # before it has collected name, phone, and email from the customer.
+                mock_tcs.append(tc)
+                try:
+                    args = json.loads(tc.function.arguments)
+                except Exception:
+                    args = {}
+
+                # ── Hard guard: never book without all 7 required fields ────────
                 if tc.function.name == "book_appointment":
                     _required = ["date", "time", "name", "phone", "email", "service", "issue"]
                     _missing  = [f for f in _required if not str(args.get(f, "")).strip()]
                     if _missing:
-                        print(f"[BOOKING GUARD] blocked — missing fields: {_missing}", flush=True)
-                        result = {
-                            "success": False,
-                            "error":   "missing_fields",
-                            "missing": _missing,
-                            "message": (
-                                f"BOOKING BLOCKED — the following fields are missing and MUST be "
-                                f"collected from the customer before calling book_appointment again: "
-                                f"{', '.join(_missing)}. Ask for each missing field one at a time."
-                            )
-                        }
+                        print(f"[BOOKING GUARD] blocked — missing: {_missing}", flush=True)
                         tool_results.append({
-                            "role":         "tool",
-                            "tool_call_id": tc.id,
-                            "content":      json.dumps(result)
+                            "role": "tool", "tool_call_id": tc.id,
+                            "content": json.dumps({
+                                "success": False, "error": "missing_fields",
+                                "missing": _missing,
+                                "message": (
+                                    f"BOOKING BLOCKED — missing fields: {', '.join(_missing)}. "
+                                    "Collect each missing field from the customer one at a time "
+                                    "before calling book_appointment again."
+                                )
+                            })
                         })
-                        continue  # skip execute_tool entirely
-                # ─────────────────────────────────────────────────────────────
+                        continue
+                # ───────────────────────────────────────────────────────────────
 
                 result = execute_tool(tc.function.name, args)
 
                 if tc.function.name == "check_availability" and result.get("slots"):
                     ui_events.append({
-                        "ui":             "slots",
-                        "date":           result["date"],
+                        "ui": "slots", "date": result["date"],
                         "formatted_date": result.get("formatted_date", result["date"]),
-                        "slots":          result["slots"]
+                        "slots": result["slots"]
                     })
 
-                # Slot just taken — re-check via execute_tool (has timeout protection)
                 if tc.function.name == "book_appointment" and result.get("error") == "slot_taken":
                     avail = execute_tool("check_availability", {"date": args["date"]})
                     if avail.get("slots"):
                         ui_events.append({
-                            "ui":             "slots",
-                            "date":           avail["date"],
+                            "ui": "slots", "date": avail["date"],
                             "formatted_date": avail.get("formatted_date", avail["date"]),
-                            "slots":          avail["slots"]
+                            "slots": avail["slots"]
                         })
                         result["new_availability"] = avail
 
                 tool_results.append({
-                    "role":         "tool",
-                    "tool_call_id": tc.id,
-                    "content":      json.dumps(result)
+                    "role": "tool", "tool_call_id": tc.id,
+                    "content": json.dumps(result)
                 })
 
-            # ── Auto-chain: find_booking succeeded in reschedule → emit slot buttons ──
-            # After find_booking returns in the reschedule flow, we can't make a second
-            # tool call in the same turn. Instead, auto-call check_availability and inject
-            # the result as a system note so the follow-up text is correct.
+            # Auto-chain find_booking → check_availability in reschedule flow
             _auto_avail_ctx = ""
             if _in_reschedule_cancel and not any(e.get("ui") == "slots" for e in ui_events):
-                for _tc in msg.tool_calls:
+                for _tc in mock_tcs:
                     if _tc.function.name == "find_booking":
                         _find_res = next(
-                            (json.loads(r["content"]) for r in tool_results if r["tool_call_id"] == _tc.id),
-                            {}
+                            (json.loads(r["content"]) for r in tool_results
+                             if r["tool_call_id"] == _tc.id), {}
                         )
                         if _find_res.get("found"):
                             _dm = re.search(r'Requested new date: ([^\n]+)', _state_text)
@@ -1537,83 +1565,69 @@ async def chat(req: ChatRequest):
                                     _avail = execute_tool("check_availability", {"date": _new_iso})
                                     if _avail.get("slots"):
                                         ui_events.insert(0, {
-                                            "ui":             "slots",
-                                            "date":           _avail["date"],
+                                            "ui": "slots", "date": _avail["date"],
                                             "formatted_date": _avail.get("formatted_date", _new_iso),
-                                            "slots":          _avail["slots"]
+                                            "slots": _avail["slots"]
                                         })
                                         _auto_avail_ctx = (
-                                            f"\n[SYSTEM: check_availability was automatically run for {_new_iso}. "
-                                            f"Result: available slots on {_avail.get('formatted_date', _new_iso)}: {_avail['slots']}. "
-                                            f"Slot buttons have been sent to the frontend. "
-                                            f"Say: 'We have availability on {_avail.get('formatted_date', _new_iso)}! "
-                                            f"Please pick a time 👇' — do NOT list slots as text.]"
+                                            f"\n[SYSTEM: check_availability run for {_new_iso}. "
+                                            f"Slots on {_avail.get('formatted_date', _new_iso)}: {_avail['slots']}. "
+                                            f"Slot buttons sent. Say: 'We have availability on "
+                                            f"{_avail.get('formatted_date', _new_iso)}! Please pick a time 👇']"
                                         )
                                     else:
                                         _auto_avail_ctx = (
-                                            f"\n[SYSTEM: check_availability was run for {_new_iso}. "
-                                            f"No slots available. Tell the customer and ask for a different date.]"
+                                            f"\n[SYSTEM: No slots on {_new_iso}. "
+                                            "Tell customer and ask for a different date.]"
                                         )
 
             _asst_msg = {
-                "role":       "assistant",
-                "content":    msg.content,
+                "role": "assistant", "content": None,
                 "tool_calls": [
-                    {
-                        "id":       tc.id,
-                        "type":     "function",
-                        "function": {"name": tc.function.name, "arguments": tc.function.arguments}
-                    }
-                    for tc in msg.tool_calls
+                    {"id": tc.id, "type": "function",
+                     "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                    for tc in mock_tcs
                 ]
             }
             follow_up = messages + [_asst_msg] + tool_results
-            # Inject auto-availability context as a system note after tool results
             if _auto_avail_ctx:
                 follow_up.append({"role": "system", "content": _auto_avail_ctx})
 
-            # Step 2: follow-up streaming response — always DeepSeek even if
-            # Step 1 used GPT-4o for vision. Image already processed; no vision needed.
-            stream = _llm_call_with_retry(
+            # Step 2: stream follow-up response token by token
+            follow_stream = _llm_call_with_retry(
                 openai_client.chat.completions.create,
                 model=follow_up_model,
                 messages=follow_up,
-                max_tokens=400,   # was 600
+                max_tokens=400,
                 temperature=0.4,
                 stream=True,
             )
-            raw_text = ""
-            for chunk in stream:
+            follow_raw = ""
+            for chunk in follow_stream:
                 delta = chunk.choices[0].delta.content
                 if delta:
-                    raw_text += delta
+                    follow_raw += delta
 
-            safe_text = validate_output(raw_text)
+            safe_text = validate_output(follow_raw)
             if _detect_loop(safe_text, req.history):
-                print("[LOOP DETECTED] tool-path response matches recent history — breaking loop", flush=True)
+                print("[LOOP DETECTED] tool-path — breaking loop", flush=True)
                 safe_text = _LOOP_BREAK
             for i, w in enumerate(safe_text.split(" ")):
                 yield f"data: {json.dumps({'token': w + (' ' if i < len(safe_text.split(' '))-1 else '')})}\n\n"
 
-            # Emit slot / datepicker UI events after the text
             for evt in ui_events:
                 yield f"data: {json.dumps(evt)}\n\n"
-
             _has_slot_ui = any(e.get("ui") == "slots" for e in ui_events)
             if not _has_slot_ui and any(t in safe_text.lower() for t in _DATE_ASK_TRIGGERS):
                 yield f"data: {json.dumps({'ui': 'datepicker'})}\n\n"
 
         else:
-            # No tool call — stream the direct response
-            content = validate_output(choice.message.content or "")
-            if _detect_loop(content, req.history):
-                print("[LOOP DETECTED] direct response matches recent history — breaking loop", flush=True)
-                content = _LOOP_BREAK
-            for i, word in enumerate(content.split(" ")):
-                token = word + (" " if i < len(content.split(" ")) - 1 else "")
-                yield f"data: {json.dumps({'token': token})}\n\n"
-
-            if any(t in content.lower() for t in _DATE_ASK_TRIGGERS):
+            # ── TEXT PATH — already streamed token by token above ───────────────
+            safe_text = validate_output(raw_text)
+            if _detect_loop(safe_text, req.history):
+                print("[LOOP DETECTED] direct response — breaking loop", flush=True)
+                yield f"data: {json.dumps({'ui': 'replace_last', 'text': _LOOP_BREAK})}\n\n"
+            elif any(t in safe_text.lower() for t in _DATE_ASK_TRIGGERS):
                 yield f"data: {json.dumps({'ui': 'datepicker'})}\n\n"
 
         yield "data: [DONE]\n\n"

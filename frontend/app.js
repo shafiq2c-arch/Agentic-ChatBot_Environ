@@ -477,6 +477,13 @@ async function sendMessage() {
           if (parsed.ui === 'slots') { showSlotPicker(parsed.slots); continue; }
           if (parsed.ui === 'datepicker') { showDatePicker(); continue; }
           if (parsed.ui === 'whatsapp_error') { hideTyping(); showWhatsAppError(); continue; }
+          if (parsed.ui === 'replace_last') {
+            // Loop detected after streaming started — replace bubble content with loop-break message
+            fullText = parsed.text || '';
+            bubble.innerHTML = renderMarkdown(fullText);
+            scrollToBottom();
+            continue;
+          }
           if (parsed.token) {
             fullText += parsed.token;
             bubble.innerHTML = renderMarkdown(fullText) + '<span class="cursor-blink">▍</span>';
