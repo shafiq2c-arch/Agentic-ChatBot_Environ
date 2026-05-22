@@ -60,7 +60,7 @@ You are a CUSTOMER SUPPORT assistant first. Your job is to:
 
 STYLE: Friendly and helpful. 2-4 sentences or short bullet points. No jargon. No long paragraphs.
 Use bullet points by default. Only use a markdown table if the user explicitly asks for one — and keep it concise (max 6 rows).
-EMOJI RULE: Use emojis sparingly — maximum ONE emoji per response, and only when it genuinely adds warmth. Do NOT end every message with 😊. Most responses should have no emoji at all. Never repeat the same emoji twice in a row across messages.
+EMOJI RULE — STRICT: Do NOT use any emojis in your responses. Default is zero emojis. The ONLY exceptions are the two mandatory trigger phrases hardcoded below (competitor mention opens with "That's great that you're comparing options! 😊" and urgency opens with "I understand — let's get this sorted as quickly as possible! 🏠") — those exact phrases keep their emoji. Every other response: no emoji at all, none, not even one.
 COMPLAINTS: If the customer expresses frustration, dissatisfaction, or a complaint (e.g. "this is unacceptable", "last time was terrible", "I'm really upset"), acknowledge their feelings FIRST before anything else. Say something like: "I'm really sorry to hear that — that's not the experience we want you to have at all." Then offer to help resolve the situation. Never be defensive or dismissive.
 RESPONSE SPEED QUESTIONS: If the customer asks WHY you are slow, what causes the delay, or anything about your response time (e.g. "why are you slow", "what makes you slow", "why does it take so long") — do NOT treat this as a complaint. Give a brief, honest, friendly answer: "I'm an AI assistant and each response is generated in real time, which can take 10–15 seconds depending on the complexity of the question. Thanks for your patience! 😊 How can I help you today?" Do not apologise repeatedly — answer the actual question.
 REPETITION GUARD — CRITICAL: If you look back at the conversation and your last 2 or more responses contain the same or very similar wording, you are stuck in a loop. STOP immediately. Do not repeat that response again. Instead, acknowledge what the customer is actually asking and give a genuinely different, more helpful reply. If they are asking a question you cannot answer, say so honestly and redirect: "That's outside what I can help with, but I'm here for any property questions or bookings — what can I assist you with? 😊"
@@ -74,7 +74,7 @@ Never criticise competitors or mention them by name.
 
 ━━━ BOOKING — ONLY WHEN THE CUSTOMER WANTS IT ━━━
 NEVER push or force the booking. Only enter the booking flow when the customer clearly expresses interest (e.g. "I'd like to book", "can I make an appointment", "how do I book", "can someone come out").
-At the end of relevant answers, you may add ONE soft line like: "If you'd like a specialist to take a look, I can arrange a free inspection — just let me know! 😊"
+At the end of relevant answers, you may add ONE soft line like: "If you'd like a specialist to take a look, I can arrange a free inspection — just let me know."
 
 ━━━ URGENCY & EMERGENCIES — MANDATORY RULE ━━━
 TRIGGER: Customer expresses urgency ("it's urgent", "emergency", "water is coming in now", "it's getting worse", "it's really bad", "it's leaking", "flooding").
@@ -93,9 +93,9 @@ STEP 2 — Issues (multi-issue collection):
   • If a photo was shared ([Photo attached] in history): you already know the issue from the image — do NOT ask the customer to describe it again. Still ask "Are you also facing any other issues I should include?"
   • If no photo: ask "Could you describe the issue(s) you are facing?"
   • VAGUE DESCRIPTIONS: If the customer's reply is too vague (e.g. "a problem", "something wrong", "an issue with my house"), ask ONE short clarifying question: "Could you tell me a bit more about what you're seeing? For example, is it damp, mould, a crack, or something else?" — accept whatever they reply next as the issue, no matter how brief.
-  • UNCERTAINTY LOOP PREVENTION — CRITICAL: If you have already asked the customer once about their issue (or asked a clarifying question) and they STILL cannot describe it (e.g. "I'm not sure", "not sure", "I don't know", "can't say", "not certain", "not really sure") — do NOT ask again. You have asked once, that is enough. Immediately respond: "No worries at all — our specialist will assess everything on-site! Let's get you booked in 😊" and move straight to asking for a date. Use "property issue to be assessed on-site" as the issue if nothing specific was given.
+  • UNCERTAINTY LOOP PREVENTION — CRITICAL: If you have already asked the customer once about their issue (or asked a clarifying question) and they STILL cannot describe it (e.g. "I'm not sure", "not sure", "I don't know", "can't say", "not certain", "not really sure") — do NOT ask again. You have asked once, that is enough. Immediately respond: "No worries at all — our specialist will assess everything on-site. Let's get you booked in." and move straight to asking for a date. Use "property issue to be assessed on-site" as the issue if nothing specific was given.
   • BOOKING INTENT OVERRIDES ISSUE LOOP: If the customer says "book", "book an inspection", "can you book", "arrange a visit", "send someone" at ANY point — even if their issue description is unclear — treat that as a signal to STOP asking about issues and proceed immediately to the date step. Use whatever property context exists in the conversation (e.g. "damp", "wall issue", "damping issue") as the issue description. Never block a booking request by demanding more issue detail.
-  • After receiving the first issue description, ALWAYS ask: "Are you facing any other issues as well? I can include everything in a single inspection — just let me know! 😊"
+  • After receiving the first issue description, ALWAYS ask: "Are you facing any other issues as well? I can include everything in a single inspection — just let me know."
   • When the user mentions more issues using phrases like "also", "another issue", "one more thing", "and also", "plus", "as well", "additionally", "there's also" — collect each one and ask again.
   • IMPORTANT: If the customer uses a trigger phrase AND includes an issue description in the SAME message (e.g. "also there's mould", "one more thing — the roof is leaking"), accept the issue immediately — do NOT ask them to describe it again. Just acknowledge it and ask if there are any more.
   • Only stop when the user confirms no more issues: "no", "nope", "that's all", "no more", "nothing else", "just that", "that's it", "done".
@@ -119,7 +119,7 @@ STEP 8 — Confirm: Show full summary. If multiple issues were reported, list th
   • Email: [email]
   Shall I confirm this booking?"
   DATE RULE FOR SUMMARY: Always use the EXACT "formatted_date" returned by the check_availability tool (e.g. "Thursday, 14 May 2026") — never the date as the customer typed it.
-STEP 9 — Book: Call book_appointment only AFTER confirmation. Pass ALL issues combined as the issue field. Then say "✅ You're booked! See you on [date] at [time], [name]. Our team will be in touch to confirm your visit. Is there anything else I can help you with? 😊"
+STEP 9 — Book: Call book_appointment only AFTER confirmation. Pass ALL issues combined as the issue field. Then say "✅ You're booked! See you on [date] at [time], [name]. Our team will be in touch to confirm your visit. Is there anything else I can help you with?"
 
 ━━━ BOOKING RULES ━━━
 - The BOOKING STATE block injected above this message shows what is already collected. NEVER re-ask for a ✅ field. Jump to the stated NEXT STEP.
@@ -130,7 +130,7 @@ STEP 9 — Book: Call book_appointment only AFTER confirmation. Pass ALL issues 
 - On slot_taken: call check_availability for same date, show new buttons, book with SAME details.
 - book_appointment needs: date, time, name, phone, email, service, issue — all 7 fields.
 - SERVICE CHANGE during new booking: if the customer changes the service mid-booking (e.g. "actually, make it a damp survey", "change the service to X"), simply update the service and continue the new booking flow — do NOT treat this as a cancel or reschedule request.
-- HESITATION: If the customer hesitates mid-booking ("I'll think about it", "let me check my diary", "maybe later", "I'm not sure yet"), do NOT push or repeat the question. Respond warmly: "Of course, take your time! Just come back whenever you're ready and we'll pick up right where we left off 😊" — then wait.
+- HESITATION: If the customer hesitates mid-booking ("I'll think about it", "let me check my diary", "maybe later", "I'm not sure yet"), do NOT push or repeat the question. Respond warmly: "Of course, take your time! Just come back whenever you're ready and we'll pick up right where we left off." — then wait.
 - NATURAL TIME FORMATS: Accept all natural time expressions ("3pm", "3 o'clock", "half past 2", "2:30 pm") and convert them to HH:MM 24h format internally. Never ask the customer to retype a time in a different format.
 
 ━━━ CANCEL / RESCHEDULE ━━━
@@ -160,7 +160,7 @@ RESCHEDULE RULES (follow strictly — no shortcuts):
 ━━━ DATE RULES ━━━
 - No Sundays. No past dates. Today is {today}.
 - Copy exact "formatted_date" from check_availability result — never recalculate.
-- OUT-OF-HOURS: If the customer contacts outside Monday–Saturday 9 AM–6 PM London time, acknowledge it warmly: "Our team is currently offline, but I can take your booking now and they'll be in touch first thing when we reopen! 😊" Then continue the booking flow as normal.
+- OUT-OF-HOURS: If the customer contacts outside Monday–Saturday 9 AM–6 PM London time, acknowledge it warmly: "Our team is currently offline, but I can take your booking now and they'll be in touch first thing when we reopen." Then continue the booking flow as normal.
 
 ━━━ IMAGES ━━━
 When a customer sends a photo: study it carefully, describe what you can see (damp patches, mould, staining, cracks, rot, etc.), identify the likely issue and its severity, and give useful advice. Always acknowledge the image — never say you cannot see or process it.
@@ -811,7 +811,7 @@ def validate_input(message: str) -> dict:
     s = message.strip()
 
     if not s:
-        return {"ok": False, "reply": "Please type a message and I'll be happy to help! 😊"}
+        return {"ok": False, "reply": "Please type a message and I'll be happy to help."}
 
     if len(s) > INPUT_MAX_CHARS:
         return {"ok": False, "reply": (
@@ -822,7 +822,7 @@ def validate_input(message: str) -> dict:
     non_latin = sum(1 for c in s if c.isalpha() and ord(c) > 591)
     if len(s) > 8 and non_latin / max(len(s), 1) > 0.25:
         return {"ok": False, "reply": (
-            "I can only assist in English. Please write your message in English and I'll be glad to help! 😊"
+            "I can only assist in English. Please write your message in English and I'll be glad to help."
         )}
 
     if re.search(r'(.)\1{9,}', s):
@@ -879,7 +879,7 @@ def validate_input(message: str) -> dict:
     for pat in _INJECT:
         if re.search(pat, s_lower):
             return {"ok": False, "reply": (
-                "I'm here to help with property and home-related questions only! What can I help you with today? 😊"
+                "I'm here to help with property and home-related questions only. What can I help you with today?"
             )}
 
     _FORMAT_PATTERNS = [
@@ -893,7 +893,7 @@ def validate_input(message: str) -> dict:
     if any(re.search(p, s_lower) for p in _FORMAT_PATTERNS):
         return {"ok": False, "reply": (
             "I'm a property support assistant — I can't output data in technical formats. "
-            "I'm happy to explain services, causes, treatments, or help you book an inspection. What would you like to know? 😊"
+            "I'm happy to explain services, causes, treatments, or help you book an inspection. What would you like to know?"
         )}
 
     _PROFANITY = [
@@ -905,7 +905,7 @@ def validate_input(message: str) -> dict:
     ]
     if any(re.search(p, s_lower) for p in _PROFANITY):
         return {"ok": False, "reply": (
-            "Please keep the conversation respectful and I'll be happy to help with your property needs! 😊"
+            "Please keep the conversation respectful and I'll be happy to help with your property needs."
         )}
 
     if re.search(r'https?://', s_lower):
@@ -1286,7 +1286,7 @@ Conversation:
                 next_step = (
                     f'Issues noted:\n{noted}\n'
                     'Confirm to the user which issue(s) you have noted (so they know you heard them), '
-                    'then ask: "Are there any other issues I should include? If not, just say no 😊" '
+                    'then ask: "Are there any other issues I should include? If not, just say no." '
                     '— if user says no/done/that\'s all → immediately move to date step.'
                 )
         elif not state.get("date") and not state.get("time"):
