@@ -936,6 +936,14 @@ def _detect_loop(current: str, history: list) -> bool:
     Returns True if `current` is too similar to recent bot messages,
     indicating the bot is stuck in a repetition loop.
     Purely code-level — does not rely on the LLM to self-detect.
+
+    False-positive guards:
+    - Booking confirmations (summaries + ✅ success) naturally share many words
+      with earlier summary messages — we skip loop detection for these.
+    - Threshold raised to 0.88 to reduce over-triggering on structurally
+      similar but contextually different responses.
+    - Only the IMMEDIATELY preceding message is checked for overlap;
+      the one before that only triggers on exact opening-line match.
     """
     if not current or not history:
         return False
@@ -947,20 +955,39 @@ def _detect_loop(current: str, history: list) -> bool:
 
     curr_norm = current.lower().strip()
 
-    for prev in bot_msgs:
+    # ── False-positive guard: booking confirmations ─────────────────────────
+    # Two booking summaries in one conversation naturally look similar.
+    # Skip loop detection entirely when the current response is a summary or
+    # a booking success message — these are never real loops.
+    _booking_markers = (
+        "shall i confirm this booking",
+        "here's a summary of your booking",
+        "here's your booking summary",
+        "you're booked",
+        "✅ you're booked",
+        "booking summary",
+        "shall i go ahead and cancel",
+        "i found your booking",
+    )
+    if any(marker in curr_norm for marker in _booking_markers):
+        return False
+
+    for i, prev in enumerate(bot_msgs):
         prev_norm = prev.lower().strip()
 
-        # 1. Opening-line match — if first 80 chars are the same, it's a loop
+        # 1. Opening-line match — if first 80 chars are identical, it's a loop
         if curr_norm[:80] and prev_norm[:80] and curr_norm[:80] == prev_norm[:80]:
             return True
 
-        # 2. Word-overlap ratio on first 250 chars — catches paraphrased repeats
-        c_words = set(curr_norm[:250].split())
-        p_words = set(prev_norm[:250].split())
-        if len(c_words) >= 8 and len(p_words) >= 8:
-            overlap = len(c_words & p_words) / max(len(c_words), len(p_words))
-            if overlap > 0.78:
-                return True
+        # 2. Word-overlap ratio — only apply to the IMMEDIATELY preceding message
+        #    (i == len(bot_msgs)-1). The older message only triggers on exact match above.
+        if i == len(bot_msgs) - 1:
+            c_words = set(curr_norm[:250].split())
+            p_words = set(prev_norm[:250].split())
+            if len(c_words) >= 8 and len(p_words) >= 8:
+                overlap = len(c_words & p_words) / max(len(c_words), len(p_words))
+                if overlap > 0.88:   # raised from 0.78 — reduces false positives
+                    return True
 
     return False
 
@@ -1231,8 +1258,9 @@ Conversation:
                     '— if user says no/done/that\'s all → immediately move to date step.'
                 )
         elif not state.get("date") and not state.get("time"):
-            next_step = ('All issues collected ✅. Ask: "Which day works for you?" '
-                         '— do NOT call check_availability yet, wait for the user to give a date first.')
+            next_step = ('All issues collected ✅. Ask: "Which day works for you? We\'re available Monday to Saturday — just let me know what suits!" '
+                         '— do NOT call check_availability yet, wait for the user to give a date first. '
+                         'DO NOT ask for name, phone, or email at this stage — date comes first.')
         elif not state.get("time"):
             date_ref = state.get("date", "the chosen date")
             next_step = (
