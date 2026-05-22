@@ -925,11 +925,43 @@ def validate_input(message: str) -> dict:
 
 
 # ── Loop detector ─────────────────────────────────
-_LOOP_BREAK = (
-    "I think I may have been going in circles there — sorry about that! 😊 "
-    "I'm here to help with any property questions, damp surveys, mould, roofing, "
-    "or to arrange a free inspection. What can I help you with today?"
+_LOOP_BREAK_GENERIC = (
+    "Sorry, let me try that differently. "
+    "I'm here to help with any property questions or to arrange a free inspection — what can I help you with?"
 )
+
+def _loop_break_message(session_state: str) -> str:
+    """
+    Return a context-aware loop-break message.
+    If a booking was in progress, acknowledge and nudge to the next step
+    instead of resetting completely — this preserves collected details.
+    """
+    s = session_state or ""
+
+    # Booking in progress — figure out what's still missing and prompt for it
+    if "BOOKING STATE" in s and "NEXT STEP:" in s:
+        # Extract the NEXT STEP hint from the injected state block
+        try:
+            next_hint = s.split("NEXT STEP:")[1].split("\n")[0].strip()
+        except IndexError:
+            next_hint = ""
+
+        if "check_availability" in next_hint or "pick a time" in next_hint.lower():
+            return "Let me pull up the available slots for you — which day were you looking at?"
+        if "name" in next_hint.lower():
+            return "Just to continue — could you share your full name so I can complete the booking?"
+        if "phone" in next_hint.lower():
+            return "Still with you! Could I get your phone number to finish the booking?"
+        if "email" in next_hint.lower():
+            return "Almost there — what's the best email address for you?"
+        if "confirm" in next_hint.lower() or "summary" in next_hint.lower():
+            return "Let me just confirm — shall I go ahead and lock in this booking for you?"
+        if "date" in next_hint.lower() or "day" in next_hint.lower():
+            return "Which day works best for you? We're available Monday to Saturday."
+        # Generic booking-in-progress nudge
+        return "Still here to help complete your booking — where would you like to pick up?"
+
+    return _LOOP_BREAK_GENERIC
 
 def _detect_loop(current: str, history: list) -> bool:
     """
@@ -1687,7 +1719,7 @@ async def chat(req: ChatRequest):
             safe_text = validate_output(follow_raw)
             if _detect_loop(safe_text, req.history):
                 print("[LOOP DETECTED] tool-path — breaking loop", flush=True)
-                safe_text = _LOOP_BREAK
+                safe_text = _loop_break_message(_state_text)
             for i, w in enumerate(safe_text.split(" ")):
                 yield f"data: {json.dumps({'token': w + (' ' if i < len(safe_text.split(' '))-1 else '')})}\n\n"
 
@@ -1702,7 +1734,7 @@ async def chat(req: ChatRequest):
             safe_text = validate_output(raw_text)
             if _detect_loop(safe_text, req.history):
                 print("[LOOP DETECTED] direct response — breaking loop", flush=True)
-                yield f"data: {json.dumps({'ui': 'replace_last', 'text': _LOOP_BREAK})}\n\n"
+                yield f"data: {json.dumps({'ui': 'replace_last', 'text': _loop_break_message(_state_text)})}\n\n"
             elif any(t in safe_text.lower() for t in _DATE_ASK_TRIGGERS):
                 yield f"data: {json.dumps({'ui': 'datepicker'})}\n\n"
 
